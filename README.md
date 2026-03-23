@@ -8,6 +8,8 @@ Slack is a first-class communication integration: install it once at the organiz
 
 Model providers can be customer-owned paid APIs or a free local Ollama connection. The default local Docker option runs `qwen2.5:0.5b` through Ollama for low-cost planning and drafting.
 
+Microsoft 365 now uses a real OAuth popup flow. To enable it locally, set `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TENANT_ID`, and `MS_REDIRECT_URI` in your `.env`, and register the redirect URI with your Azure app.
+
 ## Workspace
 
 - `apps/web`: Next.js product UI

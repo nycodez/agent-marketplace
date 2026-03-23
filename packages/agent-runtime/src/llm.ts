@@ -211,7 +211,11 @@ const getOpenAiCompatibleBaseUrl = (
   if (isRecord(metadata)) {
     const configured = metadata.baseUrl;
     if (typeof configured === "string" && configured.trim()) {
-      return configured.trim().replace(/\/+$/, "");
+      const normalized = configured.trim().replace(/\/+$/, "");
+      if (providerKey === "ollama" && !normalized.endsWith("/v1")) {
+        return `${normalized}/v1`;
+      }
+      return normalized;
     }
   }
 

@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
 import { AppShell } from "../../components/app-shell";
+import { AuthGate } from "../../components/auth-gate";
 
 export default function ProductLayout({ children }: { children: ReactNode }) {
-  return <AppShell>{children}</AppShell>;
+  return (
+    <AuthGate>
+      <AppShell>{children}</AppShell>
+    </AuthGate>
+  );
 }
-

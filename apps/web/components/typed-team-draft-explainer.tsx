@@ -71,7 +71,7 @@ export function TypedTeamDraftExplainer() {
         >
           least-privilege grants
         </button>
-        , supports first-class publication to Base and Arweave, and keeps every external write
+        , supports durability artifacts on Base and Arweave, and keeps every external write
         behind an approval queue.
       </p>
 

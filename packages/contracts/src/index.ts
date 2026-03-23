@@ -356,6 +356,12 @@ export const installIntegrationInputSchema = z.object({
   metadata: z.record(z.unknown()).default({}),
 });
 
+export const updateIntegrationInputSchema = z.object({
+  displayName: z.string().min(2).optional(),
+  scopes: z.array(z.string()).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
 export const createToolGrantInputSchema = z.object({
   organizationIntegrationId: z.string(),
   tools: z.array(z.string()).min(1),
@@ -433,6 +439,7 @@ export type MagicLinkInput = z.infer<typeof magicLinkInputSchema>;
 export type CreateDraftInput = z.infer<typeof createDraftInputSchema>;
 export type UpdateDraftInput = z.infer<typeof updateDraftInputSchema>;
 export type InstallIntegrationInput = z.infer<typeof installIntegrationInputSchema>;
+export type UpdateIntegrationInput = z.infer<typeof updateIntegrationInputSchema>;
 export type CreateToolGrantInput = z.infer<typeof createToolGrantInputSchema>;
 export type CreateProgramFileInput = z.infer<typeof createProgramFileInputSchema>;
 export type UpdateProgramFileInput = z.infer<typeof updateProgramFileInputSchema>;

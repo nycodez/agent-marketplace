@@ -1,17 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { AgentTeamDraft } from "@agent-marketplace/contracts";
 import { MonochromeButton, SectionCard } from "@agent-marketplace/ui";
+import { SESSION_CONTEXT_KEY, SESSION_TOKEN_KEY, getSessionToken } from "../../../lib/session";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_WEB_API_BASE_URL ??
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://localhost:4001";
-
-const SESSION_TOKEN_KEY = "agent-marketplace-token";
-const SESSION_CONTEXT_KEY = "agent-marketplace-session";
 
 type AuthPayload = {
   token: string;
@@ -79,6 +77,12 @@ export default function LoginPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [createdDraft, setCreatedDraft] = useState<AgentTeamDraft | null>(null);
   const [createdAccountName, setCreatedAccountName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (getSessionToken()) {
+      router.replace("/dashboard");
+    }
+  }, [router]);
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

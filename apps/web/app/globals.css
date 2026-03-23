@@ -51,18 +51,22 @@ body {
   margin: 0;
   height: 100%;
   min-height: 100%;
-  background: var(--background);
   color: var(--foreground);
+}
+
+html {
+  background-color: var(--background);
+  background-image:
+    linear-gradient(to bottom, transparent, transparent 31px, var(--accent-line) 32px),
+    linear-gradient(to right, transparent, transparent 31px, var(--accent-line) 32px);
+  background-size: 32px 32px;
+  background-repeat: repeat;
 }
 
 body {
   min-height: 100vh;
   font-family: var(--font-display);
-  background-image:
-    linear-gradient(to bottom, transparent, transparent 31px, var(--accent-line) 32px),
-    linear-gradient(to right, transparent, transparent 31px, var(--accent-line) 32px);
-  background-size: 32px 32px;
-  background-attachment: fixed;
+  background: transparent;
 }
 
 a {

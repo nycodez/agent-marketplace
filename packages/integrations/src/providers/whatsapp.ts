@@ -3,7 +3,7 @@ import { toIntegrationProvider, type IntegrationProviderDefinition } from "../de
 export const whatsappDefinition: IntegrationProviderDefinition = {
   key: "whatsapp",
   name: "WhatsApp",
-  description: "Business messaging for customer updates, handoffs, and approval-gated outbound replies.",
+  description: "Meta WhatsApp Cloud API for customer messaging, template sends, inbound webhooks, and approval-gated outbound replies.",
   category: "communication",
   authType: "api_key",
   setupMode: "api_key",

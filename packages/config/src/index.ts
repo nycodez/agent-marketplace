@@ -9,6 +9,14 @@ const read = (name: string, fallback?: string) => {
   throw new Error(`Missing required environment variable: ${name}`);
 };
 
+const readOptional = (name: string, fallback?: string) => {
+  const value = process.env[name];
+  if (value && value.trim()) {
+    return value.trim();
+  }
+  return fallback;
+};
+
 export const appConfig = {
   apiHost: read("API_HOST", "0.0.0.0"),
   apiPort: Number(read("API_PORT", "4001")),
@@ -24,6 +32,13 @@ export const appConfig = {
   temporalPublicationTaskQueue: read(
     "TEMPORAL_PUBLICATION_TASK_QUEUE",
     "agent-marketplace-publications",
+  ),
+  microsoftClientId: readOptional("MS_CLIENT_ID"),
+  microsoftClientSecret: readOptional("MS_CLIENT_SECRET"),
+  microsoftTenantId: readOptional("MS_TENANT_ID", "common"),
+  microsoftRedirectUri: readOptional(
+    "MS_REDIRECT_URI",
+    "http://localhost:4001/organization-integrations/oauth/microsoft-365/callback",
   ),
 };
 

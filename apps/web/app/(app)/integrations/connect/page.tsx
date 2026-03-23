@@ -7,6 +7,10 @@ import { MonochromeButton, SectionCard } from "@agent-marketplace/ui";
 import { integrationProviders } from "@agent-marketplace/integrations";
 import { apiFetch } from "../../../../lib/api-client";
 
+const hasLiveConnection = (integration: OrganizationIntegration) =>
+  integration.status === "connected" &&
+  (integration.providerKey !== "microsoft-365" || typeof integration.metadata.refreshToken === "string");
+
 const categoryOrder = [
   "productivity",
   "communication",
@@ -87,7 +91,7 @@ export default function ConnectIntegrationPage() {
 
   const connectedInstallations = new Map(
     integrations
-      .filter((integration) => integration.status === "connected")
+      .filter(hasLiveConnection)
       .map((integration) => [integration.providerKey, integration]),
   );
 

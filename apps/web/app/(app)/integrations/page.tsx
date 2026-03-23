@@ -10,6 +10,10 @@ type GrantWithIntegration = ToolGrant & {
   integration: OrganizationIntegration | null;
 };
 
+const hasLiveConnection = (integration: OrganizationIntegration) =>
+  integration.status === "connected" &&
+  (integration.providerKey !== "microsoft-365" || typeof integration.metadata.refreshToken === "string");
+
 export default function IntegrationsPage() {
   const [integrations, setIntegrations] = useState<OrganizationIntegration[]>([]);
   const [agents, setAgents] = useState<AgentSpec[]>([]);
@@ -59,7 +63,7 @@ export default function IntegrationsPage() {
   }, []);
 
   const connectedIntegrations = useMemo(
-    () => integrations.filter((integration) => integration.status === "connected"),
+    () => integrations.filter(hasLiveConnection),
     [integrations],
   );
 
@@ -87,7 +91,6 @@ export default function IntegrationsPage() {
             <thead>
               <tr>
                 <th>Display name</th>
-                <th>Provider</th>
                 <th>Status</th>
                 <th>Scopes</th>
                 <th>Granted to agents</th>
@@ -102,7 +105,6 @@ export default function IntegrationsPage() {
                 return (
                   <tr key={integration.id}>
                     <td>{integration.displayName}</td>
-                    <td>{integration.providerKey}</td>
                     <td>
                       <StatusPill>{integration.status}</StatusPill>
                     </td>
@@ -132,7 +134,7 @@ export default function IntegrationsPage() {
             <li>Microsoft 365 for enterprise inboxes and scheduling.</li>
             <li>Slack for approvals, escalations, and delivery backchannels.</li>
             <li>OpenAI, Claude, or Grok as the planner behind draft generation and run coordination.</li>
-            <li>Base and Arweave wallet installs for program publication.</li>
+            <li>Base and Arweave wallet installs for durability artifacts, registry anchors, and recovery records.</li>
           </ul>
         </SectionCard>
         <SectionCard title="Planner model" eyebrow="Customer-provided keys">

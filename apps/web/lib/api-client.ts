@@ -1,11 +1,11 @@
 "use client";
 
+import { clearSession, getSessionToken } from "./session";
+
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_WEB_API_BASE_URL ??
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://localhost:4001";
-
-const SESSION_TOKEN_KEY = "agent-marketplace-token";
 
 type ApiEnvelope<T> = {
   success?: boolean;
@@ -14,8 +14,6 @@ type ApiEnvelope<T> = {
     message?: string;
   }>;
 };
-
-export const getSessionToken = () => localStorage.getItem(SESSION_TOKEN_KEY);
 
 export const apiFetch = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const token = getSessionToken();
@@ -34,6 +32,14 @@ export const apiFetch = async <T,>(path: string, init?: RequestInit): Promise<T>
     ...init,
     headers,
   });
+
+  if (response.status === 401 || response.status === 403) {
+    clearSession();
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("Your session has expired. Please log in again.");
+  }
 
   const payload = (await response.json()) as ApiEnvelope<T>;
   if (!response.ok || !payload?.success || payload.data === undefined) {

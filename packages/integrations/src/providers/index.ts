@@ -11,5 +11,6 @@ export { ollamaDefinition, ollamaProvider } from "./ollama";
 export { openAiDefinition, openAiProvider } from "./openai";
 export { salesforceDefinition, salesforceProvider } from "./salesforce";
 export { slackDefinition, slackProvider } from "./slack";
+export { smartsheetDefinition, smartsheetProvider } from "./smartsheet";
 export { whatsappDefinition, whatsappProvider } from "./whatsapp";
 export { webhookDefinition, webhookProvider } from "./webhook";

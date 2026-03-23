@@ -1,21 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { clearSession } from "../lib/session";
 import { ThemeToggle } from "./theme-toggle";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", shortLabel: "DB" },
   { href: "/agents", label: "Agents", shortLabel: "AG" },
   { href: "/integrations", label: "Integrations", shortLabel: "IN" },
-  { href: "/publishing", label: "Publishing", shortLabel: "PB" },
+  { href: "/publishing", label: "Durability", shortLabel: "DU" },
   { href: "/approvals", label: "Approvals", shortLabel: "AP" },
   { href: "/runs", label: "Runs", shortLabel: "RN" },
 ];
 
 export function AgentNavOrb() {
   const pathname = usePathname();
+  const router = useRouter();
   const [pinnedOpen, setPinnedOpen] = useState(false);
   const [hoverOpen, setHoverOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -54,6 +56,13 @@ export function AgentNavOrb() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
+
+  const handleLogout = () => {
+    clearSession();
+    setPinnedOpen(false);
+    setHoverOpen(false);
+    router.replace("/login");
+  };
 
   return (
     <div
@@ -132,9 +141,9 @@ export function AgentNavOrb() {
           </nav>
 
           <div className="agent-nav-orb__footer">
-            <Link href="/login" className="mono-button mono-button--secondary">
+            <button type="button" className="mono-button mono-button--secondary" onClick={handleLogout}>
               Log out
-            </Link>
+            </button>
             <ThemeToggle />
           </div>
         </div>

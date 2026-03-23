@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   createToolGrantInputSchema,
   createProgramFileInputSchema,
@@ -10,6 +11,7 @@ import {
   runCreateInputSchema,
   type ProgramFile,
   type PublicationRecord,
+  updateIntegrationInputSchema,
   updateDraftInputSchema,
   updateProgramFileInputSchema,
   type AgentSpec,
@@ -68,6 +70,20 @@ const slugify = (value: string) =>
     .replace(/^-+|-+$/g, "");
 
 const modelProviderKeys = new Set(["openai", "anthropic", "grok", "gemini", "ollama"]);
+const MICROSOFT_365_PROVIDER_KEY = "microsoft-365";
+const WHATSAPP_PROVIDER_KEY = "whatsapp";
+const MICROSOFT_365_SCOPES = [
+  "openid",
+  "profile",
+  "offline_access",
+  "User.Read",
+  "Mail.Read",
+  "Mail.Send",
+  "Calendars.Read",
+  "Calendars.ReadWrite",
+  "Files.Read.All",
+];
+const DEFAULT_WHATSAPP_GRAPH_VERSION = "v23.0";
 
 const maskSecretValue = (value: string) => {
   const lastFour = value.slice(-4);
@@ -97,6 +113,366 @@ const sanitizeIntegration = (integration: OrganizationIntegration) => ({
   ...integration,
   metadata: sanitizeIntegrationMetadata(integration.metadata),
 });
+
+const microsoftOauthConfigured = () =>
+  !!appConfig.microsoftClientId && !!appConfig.microsoftClientSecret && !!appConfig.microsoftRedirectUri;
+
+const createOauthState = (payload: Record<string, string>) => {
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", appConfig.sessionSecret)
+    .update(encodedPayload)
+    .digest("base64url");
+  return `${encodedPayload}.${signature}`;
+};
+
+const parseOauthState = (value: string) => {
+  const [encodedPayload, signature] = value.split(".");
+  if (!encodedPayload || !signature) {
+    throw new Error("Invalid OAuth state.");
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", appConfig.sessionSecret)
+    .update(encodedPayload)
+    .digest("base64url");
+
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
+    throw new Error("Invalid OAuth state signature.");
+  }
+
+  return JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as Record<string, string>;
+};
+
+const encodePopupResultHtml = ({
+  status,
+  message,
+  integrationId,
+  providerKey,
+}: {
+  status: "success" | "error";
+  message: string;
+  integrationId: string | null;
+  providerKey: string;
+}) => `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${status === "success" ? "Connection complete" : "Connection failed"}</title>
+  </head>
+  <body style="font-family: monospace; background: #111; color: #f5f5f5; padding: 24px;">
+    <p>${message}</p>
+    <script>
+      (function () {
+        const payload = ${JSON.stringify({
+          source: "agent-marketplace-oauth",
+          status,
+          message,
+          integrationId,
+          providerKey,
+        })};
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(payload, ${JSON.stringify(new URL(appConfig.appUrl).origin)});
+          window.close();
+        }
+      })();
+    </script>
+  </body>
+</html>`;
+
+const getMicrosoftAuthorizationUrl = ({
+  integration,
+  userEmail,
+}: {
+  integration: OrganizationIntegration;
+  userEmail?: string;
+}) => {
+  if (!microsoftOauthConfigured()) {
+    throw new Error("Microsoft OAuth is not configured on this environment.");
+  }
+
+  const nonce = crypto.randomUUID();
+  integration.metadata = {
+    ...integration.metadata,
+    oauthNonce: nonce,
+    oauthRequestedAt: nowIso(),
+  };
+  integration.updatedAt = nowIso();
+
+  const state = createOauthState({
+    integrationId: integration.id,
+    organizationId: integration.organizationId,
+    providerKey: integration.providerKey,
+    nonce,
+  });
+
+  const query = new URLSearchParams({
+    client_id: appConfig.microsoftClientId!,
+    redirect_uri: appConfig.microsoftRedirectUri!,
+    response_type: "code",
+    response_mode: "query",
+    scope: MICROSOFT_365_SCOPES.join(" "),
+    prompt: "select_account",
+    state,
+  });
+
+  if (userEmail) {
+    query.set("login_hint", userEmail);
+  }
+
+  return `https://login.microsoftonline.com/${appConfig.microsoftTenantId}/oauth2/v2.0/authorize?${query.toString()}`;
+};
+
+const getWhatsAppConfig = (integration: OrganizationIntegration) => {
+  const accessToken =
+    typeof integration.metadata.accessToken === "string"
+      ? integration.metadata.accessToken.trim()
+      : typeof integration.metadata.apiKey === "string"
+        ? integration.metadata.apiKey.trim()
+        : "";
+  const phoneNumberId =
+    typeof integration.metadata.phoneNumberId === "string" ? integration.metadata.phoneNumberId.trim() : "";
+  const businessAccountId =
+    typeof integration.metadata.businessAccountId === "string"
+      ? integration.metadata.businessAccountId.trim()
+      : typeof integration.metadata.wabaId === "string"
+        ? integration.metadata.wabaId.trim()
+        : "";
+  const appId = typeof integration.metadata.appId === "string" ? integration.metadata.appId.trim() : "";
+  const appSecret = typeof integration.metadata.appSecret === "string" ? integration.metadata.appSecret.trim() : "";
+  const verifyToken =
+    typeof integration.metadata.verifyToken === "string" ? integration.metadata.verifyToken.trim() : "";
+  const graphApiVersion =
+    typeof integration.metadata.graphApiVersion === "string" && integration.metadata.graphApiVersion.trim()
+      ? integration.metadata.graphApiVersion.trim()
+      : DEFAULT_WHATSAPP_GRAPH_VERSION;
+
+  return {
+    accessToken,
+    phoneNumberId,
+    businessAccountId,
+    appId,
+    appSecret,
+    verifyToken,
+    graphApiVersion,
+  };
+};
+
+const assertWhatsAppConfig = (integration: OrganizationIntegration) => {
+  const config = getWhatsAppConfig(integration);
+  if (!config.accessToken) {
+    throw new Error("WhatsApp access token is required.");
+  }
+  if (!config.phoneNumberId) {
+    throw new Error("WhatsApp phone number ID is required.");
+  }
+  if (!config.businessAccountId) {
+    throw new Error("WhatsApp Business account ID is required.");
+  }
+  if (!config.appSecret) {
+    throw new Error("Meta app secret is required for webhook verification.");
+  }
+  if (!config.verifyToken) {
+    throw new Error("Webhook verify token is required.");
+  }
+  return config;
+};
+
+const createWhatsAppGraphUrl = (
+  graphApiVersion: string,
+  path: string,
+  params?: Record<string, string>,
+) => {
+  const baseUrl = new URL(`https://graph.facebook.com/${graphApiVersion}/${path.replace(/^\/+/, "")}`);
+  if (params) {
+    Object.entries(params).forEach(([key, value]) => {
+      if (value) {
+        baseUrl.searchParams.set(key, value);
+      }
+    });
+  }
+  return baseUrl;
+};
+
+const fetchWhatsAppGraph = async (
+  integration: OrganizationIntegration,
+  path: string,
+  init?: RequestInit & { params?: Record<string, string> },
+) => {
+  const config = assertWhatsAppConfig(integration);
+  const response = await fetch(
+    createWhatsAppGraphUrl(config.graphApiVersion, path, init?.params),
+    {
+      method: init?.method ?? "GET",
+      headers: {
+        Authorization: `Bearer ${config.accessToken}`,
+        "Content-Type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+      body: init?.body,
+    },
+  );
+
+  const bodyText = await response.text();
+  const body = bodyText
+    ? (() => {
+        try {
+          return JSON.parse(bodyText) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
+  if (!response.ok) {
+    const message =
+      typeof body?.error === "object" && body?.error && "message" in body.error
+        ? String((body.error as { message?: unknown }).message ?? "WhatsApp request failed.")
+        : `WhatsApp request failed with status ${response.status}.`;
+    throw new Error(message);
+  }
+
+  return body;
+};
+
+const verifyWhatsAppWebhookSignature = ({
+  rawBody,
+  signatureHeader,
+  appSecret,
+}: {
+  rawBody: string;
+  signatureHeader: string | undefined;
+  appSecret: string;
+}) => {
+  if (!signatureHeader || !signatureHeader.startsWith("sha256=")) {
+    return false;
+  }
+
+  const expected = crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex");
+  const provided = signatureHeader.slice("sha256=".length);
+  if (provided.length !== expected.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+};
+
+const getWhatsAppIntegrationForWebhook = (
+  payload: Record<string, unknown> | null,
+) => {
+  let phoneNumberId: string | null = null;
+  const entries = Array.isArray(payload?.entry) ? payload.entry : [];
+
+  for (const entry of entries) {
+    const changes =
+      typeof entry === "object" && entry && Array.isArray((entry as { changes?: unknown[] }).changes)
+        ? (entry as { changes: unknown[] }).changes
+        : [];
+
+    for (const change of changes) {
+      const metadata =
+        typeof change === "object" &&
+        change &&
+        typeof (change as { value?: unknown }).value === "object" &&
+        (change as { value: { metadata?: { phone_number_id?: unknown } } }).value
+          ? (change as { value: { metadata?: { phone_number_id?: unknown } } }).value.metadata
+          : undefined;
+
+      if (typeof metadata?.phone_number_id === "string" && metadata.phone_number_id) {
+        phoneNumberId = metadata.phone_number_id;
+        break;
+      }
+    }
+
+    if (phoneNumberId) {
+      break;
+    }
+  }
+
+  if (!phoneNumberId) {
+    return null;
+  }
+
+  return (
+    getStore().organizationIntegrations.find((candidate) => {
+      if (candidate.providerKey !== WHATSAPP_PROVIDER_KEY || candidate.status !== "connected") {
+        return false;
+      }
+      return getWhatsAppConfig(candidate).phoneNumberId === phoneNumberId;
+    }) ?? null
+  );
+};
+
+const exchangeMicrosoftAuthorizationCode = async (code: string) => {
+  if (!microsoftOauthConfigured()) {
+    throw new Error("Microsoft OAuth is not configured on this environment.");
+  }
+
+  const response = await fetch(
+    `https://login.microsoftonline.com/${appConfig.microsoftTenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: appConfig.microsoftClientId!,
+        client_secret: appConfig.microsoftClientSecret!,
+        redirect_uri: appConfig.microsoftRedirectUri!,
+        grant_type: "authorization_code",
+        code,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Microsoft token exchange failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
+};
+
+const refreshMicrosoftAccessToken = async (refreshToken: string) => {
+  if (!microsoftOauthConfigured()) {
+    throw new Error("Microsoft OAuth is not configured on this environment.");
+  }
+
+  const response = await fetch(
+    `https://login.microsoftonline.com/${appConfig.microsoftTenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: appConfig.microsoftClientId!,
+        client_secret: appConfig.microsoftClientSecret!,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        scope: MICROSOFT_365_SCOPES.join(" "),
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Microsoft token refresh failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
+};
+
+const getMicrosoftGraphProfile = async (accessToken: string) => {
+  const response = await fetch("https://graph.microsoft.com/v1.0/me", {
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Microsoft Graph profile lookup failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
+};
 
 const buildAgentVersion = ({
   agentId,
@@ -770,7 +1146,9 @@ export const registerRoutes = async (app: FastifyInstance) => {
           provider.setupMode === "oauth"
             ? "Complete the OAuth callback to finish setup."
             : provider.setupMode === "api_key"
-              ? provider.key === "ollama"
+              ? provider.key === WHATSAPP_PROVIDER_KEY
+                ? "Store the Meta access token, phone number ID, business account ID, app secret, and verify token, then run a test."
+                : provider.key === "ollama"
                 ? "Set metadata.baseUrl if needed, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
                 : modelProviderKeys.has(provider.key)
                   ? "Store the provider API key in metadata.apiKey, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
@@ -780,6 +1158,278 @@ export const registerRoutes = async (app: FastifyInstance) => {
                 : "Send events to the webhook endpoint to activate runs.",
       }),
     );
+  });
+
+  app.patch("/organization-integrations/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.organizationId === authContext.organization.id,
+    );
+    if (!integration) {
+      return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    const parsed = updateIntegrationInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    if (parsed.data.displayName) {
+      integration.displayName = parsed.data.displayName;
+    }
+    if (parsed.data.scopes) {
+      integration.scopes = parsed.data.scopes.length ? parsed.data.scopes : integration.scopes;
+    }
+    if (parsed.data.metadata) {
+      integration.metadata = withStoredIntegrationMetadata({
+        ...integration.metadata,
+        ...parsed.data.metadata,
+      });
+    }
+    integration.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "integration.updated",
+      entityType: "organization_integration",
+      entityId: integration.id,
+      payload: {
+        providerKey: integration.providerKey,
+      },
+    });
+
+    return reply.send(ok(sanitizeIntegration(integration)));
+  });
+
+  app.post("/organization-integrations/:id/disconnect", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.organizationId === authContext.organization.id,
+    );
+    if (!integration) {
+      return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    integration.status = "revoked";
+    integration.updatedAt = nowIso();
+
+    const affectedGrants = getStore().toolGrants.filter(
+      (grant) => grant.organizationIntegrationId === integration.id,
+    );
+    getStore().toolGrants = getStore().toolGrants.filter(
+      (grant) => grant.organizationIntegrationId !== integration.id,
+    );
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "integration.disconnected",
+      entityType: "organization_integration",
+      entityId: integration.id,
+      payload: {
+        providerKey: integration.providerKey,
+        removedGrantCount: affectedGrants.length,
+      },
+    });
+
+    return reply.send(
+      ok({
+        integration: sanitizeIntegration(integration),
+        removedGrantCount: affectedGrants.length,
+      }),
+    );
+  });
+
+  app.post("/organization-integrations/:id/oauth/start", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.organizationId === authContext.organization.id,
+    );
+
+    if (!integration) {
+      return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    if (integration.providerKey !== MICROSOFT_365_PROVIDER_KEY) {
+      return reply.code(501).send(
+        fail("provider", "Real OAuth start is not implemented for this provider yet.", "not_supported"),
+      );
+    }
+
+    if (!microsoftOauthConfigured()) {
+      return reply.code(503).send(
+        fail("provider", "Microsoft OAuth environment variables are not configured.", "config"),
+      );
+    }
+
+    const authorizationUrl = getMicrosoftAuthorizationUrl({
+      integration,
+      userEmail: authContext.user.email,
+    });
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "integration.oauth_started",
+      entityType: "organization_integration",
+      entityId: integration.id,
+      payload: {
+        providerKey: integration.providerKey,
+      },
+    });
+
+    return reply.send(
+      ok({
+        integration: sanitizeIntegration(integration),
+        authorizationUrl,
+      }),
+    );
+  });
+
+  app.get("/organization-integrations/oauth/microsoft-365/callback", async (request, reply) => {
+    const query = request.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    if (query.error) {
+      return reply
+        .type("text/html")
+        .send(
+          encodePopupResultHtml({
+            status: "error",
+            message: query.error_description ?? query.error,
+            integrationId: null,
+            providerKey: MICROSOFT_365_PROVIDER_KEY,
+          }),
+        );
+    }
+
+    if (!query.code || !query.state) {
+      return reply
+        .type("text/html")
+        .send(
+          encodePopupResultHtml({
+            status: "error",
+            message: "Microsoft did not return a valid authorization code.",
+            integrationId: null,
+            providerKey: MICROSOFT_365_PROVIDER_KEY,
+          }),
+        );
+    }
+
+    try {
+      const state = parseOauthState(query.state);
+      const integration = getStore().organizationIntegrations.find(
+        (candidate) =>
+          candidate.id === state.integrationId &&
+          candidate.organizationId === state.organizationId &&
+          candidate.providerKey === MICROSOFT_365_PROVIDER_KEY,
+      );
+
+      if (!integration) {
+        throw new Error("Integration installation not found.");
+      }
+
+      const oauthNonce = typeof integration.metadata.oauthNonce === "string" ? integration.metadata.oauthNonce : null;
+      if (!oauthNonce || oauthNonce !== state.nonce) {
+        throw new Error("OAuth state validation failed.");
+      }
+
+      const tokenPayload = await exchangeMicrosoftAuthorizationCode(query.code);
+      const accessToken =
+        typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
+      const refreshToken =
+        typeof tokenPayload.refresh_token === "string" ? tokenPayload.refresh_token : null;
+
+      if (!accessToken || !refreshToken) {
+        throw new Error("Microsoft OAuth did not return the required tokens.");
+      }
+
+      const profile = await getMicrosoftGraphProfile(accessToken);
+      const providerAccountId = typeof profile.id === "string" ? profile.id : null;
+      const email =
+        typeof profile.mail === "string" && profile.mail
+          ? profile.mail
+          : typeof profile.userPrincipalName === "string"
+            ? profile.userPrincipalName
+            : null;
+      const displayName = typeof profile.displayName === "string" ? profile.displayName : null;
+
+      integration.metadata = withStoredIntegrationMetadata({
+        ...integration.metadata,
+        refreshToken,
+        scope: typeof tokenPayload.scope === "string" ? tokenPayload.scope : MICROSOFT_365_SCOPES.join(" "),
+        tokenType: typeof tokenPayload.token_type === "string" ? tokenPayload.token_type : "Bearer",
+        providerAccountId,
+        accountEmail: email,
+        accountDisplayName: displayName,
+        oauthConnectedAt: nowIso(),
+      });
+      delete integration.metadata.oauthNonce;
+      delete integration.metadata.oauthRequestedAt;
+      integration.status = "connected";
+      integration.lastValidatedAt = nowIso();
+      integration.updatedAt = nowIso();
+
+      recordAuditEvent({
+        organizationId: integration.organizationId,
+        workspaceId: null,
+        userId: integration.createdByUserId,
+        eventType: "integration.oauth_completed",
+        entityType: "organization_integration",
+        entityId: integration.id,
+        payload: {
+          providerKey: integration.providerKey,
+          providerAccountId,
+          accountEmail: email,
+        },
+      });
+
+      await persistStore();
+
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "success",
+          message: `${integration.displayName} connected successfully.`,
+          integrationId: integration.id,
+          providerKey: integration.providerKey,
+        }),
+      );
+    } catch (error) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: error instanceof Error ? error.message : "Microsoft OAuth failed.",
+          integrationId: null,
+          providerKey: MICROSOFT_365_PROVIDER_KEY,
+        }),
+      );
+    }
   });
 
   app.post("/organization-integrations/:id/oauth/callback", async (request, reply) => {
@@ -830,6 +1480,179 @@ export const registerRoutes = async (app: FastifyInstance) => {
     );
     if (!integration) {
       return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    if (integration.providerKey === MICROSOFT_365_PROVIDER_KEY) {
+      const refreshToken =
+        typeof integration.metadata.refreshToken === "string" ? integration.metadata.refreshToken : null;
+
+      if (!refreshToken) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: "Microsoft 365 is not authorized yet. Complete the OAuth popup first.",
+            },
+          }),
+        );
+      }
+
+      try {
+        const tokenPayload = await refreshMicrosoftAccessToken(refreshToken);
+        const accessToken =
+          typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
+        if (!accessToken) {
+          throw new Error("Microsoft did not return an access token.");
+        }
+
+        const profile = await getMicrosoftGraphProfile(accessToken);
+        const nextRefreshToken =
+          typeof tokenPayload.refresh_token === "string" ? tokenPayload.refresh_token : refreshToken;
+        const providerAccountId = typeof profile.id === "string" ? profile.id : null;
+        const email =
+          typeof profile.mail === "string" && profile.mail
+            ? profile.mail
+            : typeof profile.userPrincipalName === "string"
+              ? profile.userPrincipalName
+              : null;
+        const displayName = typeof profile.displayName === "string" ? profile.displayName : null;
+
+        integration.metadata = withStoredIntegrationMetadata({
+          ...integration.metadata,
+          refreshToken: nextRefreshToken,
+          scope:
+            typeof tokenPayload.scope === "string" ? tokenPayload.scope : integration.metadata.scope,
+          tokenType:
+            typeof tokenPayload.token_type === "string"
+              ? tokenPayload.token_type
+              : integration.metadata.tokenType,
+          providerAccountId,
+          accountEmail: email,
+          accountDisplayName: displayName,
+          oauthValidatedAt: nowIso(),
+        });
+        integration.status = "connected";
+        integration.lastValidatedAt = nowIso();
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: true,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: null,
+            },
+          }),
+        );
+      } catch (error) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: error instanceof Error ? error.message : "Microsoft 365 validation failed.",
+            },
+          }),
+        );
+      }
+    }
+
+    if (integration.providerKey === WHATSAPP_PROVIDER_KEY) {
+      try {
+        const config = assertWhatsAppConfig(integration);
+        const phoneNumber = await fetchWhatsAppGraph(
+          integration,
+          config.phoneNumberId,
+          {
+            params: {
+              fields: "id,display_phone_number,verified_name,quality_rating",
+            },
+          },
+        );
+
+        const businessAccount = await fetchWhatsAppGraph(
+          integration,
+          config.businessAccountId,
+          {
+            params: {
+              fields: "id,name,message_template_namespace",
+            },
+          },
+        );
+
+        integration.metadata = withStoredIntegrationMetadata({
+          ...integration.metadata,
+          phoneNumberId: config.phoneNumberId,
+          businessAccountId: config.businessAccountId,
+          appId: config.appId,
+          appSecret: config.appSecret,
+          verifyToken: config.verifyToken,
+          graphApiVersion: config.graphApiVersion,
+          displayPhoneNumber:
+            typeof phoneNumber?.display_phone_number === "string"
+              ? phoneNumber.display_phone_number
+              : integration.metadata.displayPhoneNumber,
+          verifiedName:
+            typeof phoneNumber?.verified_name === "string"
+              ? phoneNumber.verified_name
+              : integration.metadata.verifiedName,
+          qualityRating:
+            typeof phoneNumber?.quality_rating === "string"
+              ? phoneNumber.quality_rating
+              : integration.metadata.qualityRating,
+          businessName:
+            typeof businessAccount?.name === "string"
+              ? businessAccount.name
+              : integration.metadata.businessName,
+          messageTemplateNamespace:
+            typeof businessAccount?.message_template_namespace === "string"
+              ? businessAccount.message_template_namespace
+              : integration.metadata.messageTemplateNamespace,
+        });
+        integration.status = "connected";
+        integration.lastValidatedAt = nowIso();
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: true,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: null,
+            },
+          }),
+        );
+      } catch (error) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: error instanceof Error ? error.message : "WhatsApp validation failed.",
+            },
+          }),
+        );
+      }
     }
 
     if (modelProviderKeys.has(integration.providerKey)) {
@@ -1916,20 +2739,122 @@ export const registerRoutes = async (app: FastifyInstance) => {
     return reply.send(ok(run));
   });
 
-  app.post("/events/webhooks/:provider", async (request, reply) => {
-    const provider = findIntegrationProvider((request.params as { provider: string }).provider);
-    if (!provider) {
-      return reply.code(404).send(fail("provider", "Integration provider not found.", "exists"));
+  app.get("/events/webhooks/whatsapp", async (request, reply) => {
+    const query = request.query as {
+      "hub.mode"?: string;
+      "hub.verify_token"?: string;
+      "hub.challenge"?: string;
+    };
+
+    if (query["hub.mode"] !== "subscribe" || !query["hub.verify_token"] || !query["hub.challenge"]) {
+      return reply.code(400).send("Invalid WhatsApp webhook verification request.");
     }
 
-    return reply.code(202).send(
-      ok({
-        accepted: true,
-        provider: provider.key,
-        eventId: createId("event"),
-      }),
-    );
+    const integration =
+      getStore().organizationIntegrations.find((candidate) => {
+        if (candidate.providerKey !== WHATSAPP_PROVIDER_KEY) {
+          return false;
+        }
+        return getWhatsAppConfig(candidate).verifyToken === query["hub.verify_token"];
+      }) ?? null;
+
+    if (!integration) {
+      return reply.code(403).send("Webhook verification failed.");
+    }
+
+    integration.metadata = withStoredIntegrationMetadata({
+      ...integration.metadata,
+      webhookVerifiedAt: nowIso(),
+    });
+    integration.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: integration.organizationId,
+      workspaceId: null,
+      userId: integration.createdByUserId,
+      eventType: "integration.webhook_verified",
+      entityType: "organization_integration",
+      entityId: integration.id,
+      payload: {
+        providerKey: integration.providerKey,
+        phoneNumberId: getWhatsAppConfig(integration).phoneNumberId,
+      },
+    });
+
+    return reply.type("text/plain").send(query["hub.challenge"]);
   });
+
+  app.post(
+    "/events/webhooks/:provider",
+    {
+      config: {
+        rawBody: true,
+      },
+    },
+    async (request, reply) => {
+      const provider = findIntegrationProvider((request.params as { provider: string }).provider);
+      if (!provider) {
+        return reply.code(404).send(fail("provider", "Integration provider not found.", "exists"));
+      }
+
+      if (provider.key === WHATSAPP_PROVIDER_KEY) {
+        const payload =
+          typeof request.body === "object" && request.body ? (request.body as Record<string, unknown>) : null;
+        const integration = getWhatsAppIntegrationForWebhook(payload);
+        if (!integration) {
+          return reply.code(404).send(fail("provider", "No connected WhatsApp install matched this event.", "exists"));
+        }
+
+        const signatureHeader = request.headers["x-hub-signature-256"];
+        const rawBody = String((request as { rawBody?: string }).rawBody ?? "");
+        const config = getWhatsAppConfig(integration);
+        if (!rawBody || !config.appSecret) {
+          return reply.code(400).send(fail("provider", "WhatsApp webhook signature could not be verified.", "auth"));
+        }
+
+        const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+        if (!verifyWhatsAppWebhookSignature({ rawBody, signatureHeader: signature, appSecret: config.appSecret })) {
+          return reply.code(401).send(fail("provider", "WhatsApp webhook signature was invalid.", "auth"));
+        }
+
+        recordAuditEvent({
+          organizationId: integration.organizationId,
+          workspaceId: null,
+          userId: null,
+          eventType: "integration.webhook_received",
+          entityType: "organization_integration",
+          entityId: integration.id,
+          payload: {
+            providerKey: integration.providerKey,
+            phoneNumberId: config.phoneNumberId,
+          },
+        });
+
+        integration.metadata = withStoredIntegrationMetadata({
+          ...integration.metadata,
+          lastWebhookEventAt: nowIso(),
+        });
+        integration.updatedAt = nowIso();
+
+        return reply.code(202).send(
+          ok({
+            accepted: true,
+            provider: provider.key,
+            eventId: createId("event"),
+            integrationId: integration.id,
+          }),
+        );
+      }
+
+      return reply.code(202).send(
+        ok({
+          accepted: true,
+          provider: provider.key,
+          eventId: createId("event"),
+        }),
+      );
+    },
+  );
 
   app.get("/audit-events", async (request, reply) => {
     const authContext = await requireSession(request, reply);
