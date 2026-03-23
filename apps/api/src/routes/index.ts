@@ -67,7 +67,7 @@ const slugify = (value: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-const modelProviderKeys = new Set(["openai", "anthropic", "grok"]);
+const modelProviderKeys = new Set(["openai", "anthropic", "grok", "gemini", "ollama"]);
 
 const maskSecretValue = (value: string) => {
   const lastFour = value.slice(-4);
@@ -770,8 +770,10 @@ export const registerRoutes = async (app: FastifyInstance) => {
           provider.setupMode === "oauth"
             ? "Complete the OAuth callback to finish setup."
             : provider.setupMode === "api_key"
-              ? modelProviderKeys.has(provider.key)
-                ? "Store the provider API key in metadata.apiKey, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
+              ? provider.key === "ollama"
+                ? "Set metadata.baseUrl if needed, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
+                : modelProviderKeys.has(provider.key)
+                  ? "Store the provider API key in metadata.apiKey, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
                 : "Store and verify the API key out of band."
               : provider.setupMode === "wallet"
                 ? "Connect a publishing wallet or signer, then verify the install."

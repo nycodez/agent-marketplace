@@ -8,16 +8,19 @@ import {
 } from "@agent-marketplace/contracts";
 import { findIntegrationToolDefinitions } from "@agent-marketplace/integrations";
 
-const MODEL_PROVIDER_KEYS: ModelProviderKey[] = ["openai", "anthropic", "grok"];
+const MODEL_PROVIDER_KEYS: ModelProviderKey[] = ["openai", "anthropic", "grok", "gemini", "ollama"];
 const DEFAULT_MODELS: Record<ModelProviderKey, string> = {
-  openai: "gpt-4.1-mini",
-  anthropic: "claude-3-5-sonnet-latest",
+  openai: "gpt-5.4-mini",
+  anthropic: "claude-sonnet-4-5",
   grok: "grok-3-mini",
+  gemini: "gemini-2.5-flash-lite",
+  ollama: "qwen2.5:0.5b",
 };
 
-const OPENAI_COMPATIBLE_BASE_URLS: Record<Exclude<ModelProviderKey, "anthropic">, string> = {
+const OPENAI_COMPATIBLE_BASE_URLS: Record<Exclude<ModelProviderKey, "anthropic" | "gemini">, string> = {
   openai: "https://api.openai.com/v1",
   grok: "https://api.x.ai/v1",
+  ollama: "http://ollama:11434/v1",
 };
 
 const runPlanJsonSchema = {
@@ -200,7 +203,10 @@ const prefersPlanning = (integration: OrganizationIntegration) => {
   return isRecord(metadata) && metadata.defaultForPlanning === true;
 };
 
-const getOpenAiCompatibleBaseUrl = (integration: OrganizationIntegration, providerKey: "openai" | "grok") => {
+const getOpenAiCompatibleBaseUrl = (
+  integration: OrganizationIntegration,
+  providerKey: "openai" | "grok" | "ollama",
+) => {
   const metadata = integration.metadata;
   if (isRecord(metadata)) {
     const configured = metadata.baseUrl;
@@ -281,14 +287,14 @@ const callOpenAiCompatibleJson = async ({
   userPrompt,
 }: {
   integration: OrganizationIntegration;
-  providerKey: "openai" | "grok";
+  providerKey: "openai" | "grok" | "ollama";
   schemaName: string;
   schema: Record<string, unknown>;
   systemPrompt: string;
   userPrompt: string;
 }) => {
   const apiKey = extractApiKey(integration);
-  if (!apiKey) {
+  if (providerKey !== "ollama" && !apiKey) {
     throw new Error(`${providerKey} integration is missing an apiKey.`);
   }
 
@@ -296,7 +302,7 @@ const callOpenAiCompatibleJson = async ({
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
     },
     body: JSON.stringify({
       model: getConfiguredModel(integration, providerKey),
@@ -329,6 +335,101 @@ const callOpenAiCompatibleJson = async ({
   const message = isRecord(choices[0].message) ? choices[0].message : null;
   const content = message ? extractJsonText(message.content) : "";
   return parseJsonObject(content);
+};
+
+const toGeminiSchema = (schema: Record<string, unknown>): Record<string, unknown> => {
+  if (Array.isArray(schema)) {
+    return { type: "ARRAY", items: schema.map((item) => toGeminiSchema(item as Record<string, unknown>)) };
+  }
+
+  if (Array.isArray(schema.anyOf)) {
+    const preferredBranch = schema.anyOf.find(
+      (candidate) => isRecord(candidate) && candidate.type !== "null",
+    );
+    return isRecord(preferredBranch) ? toGeminiSchema(preferredBranch) : { type: "STRING" };
+  }
+
+  const next = { ...schema } as Record<string, unknown>;
+  const type = next.type;
+  if (typeof type === "string") {
+    next.type = type.toUpperCase();
+  }
+
+  if (isRecord(next.properties)) {
+    next.properties = Object.fromEntries(
+      Object.entries(next.properties).map(([key, value]) => [key, isRecord(value) ? toGeminiSchema(value) : value]),
+    );
+  }
+
+  if (isRecord(next.items)) {
+    next.items = toGeminiSchema(next.items);
+  }
+
+  return next;
+};
+
+const callGeminiJson = async ({
+  integration,
+  schema,
+  systemPrompt,
+  userPrompt,
+}: {
+  integration: OrganizationIntegration;
+  schema: Record<string, unknown>;
+  systemPrompt: string;
+  userPrompt: string;
+}) => {
+  const apiKey = extractApiKey(integration);
+  if (!apiKey) {
+    throw new Error("Gemini integration is missing an apiKey.");
+  }
+
+  const model = getConfiguredModel(integration, "gemini");
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          role: "system",
+          parts: [{ text: systemPrompt }],
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: userPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+          responseSchema: toGeminiSchema(schema),
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`gemini request failed: ${response.status} ${await response.text()}`);
+  }
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  const candidates = payload.candidates;
+  if (!Array.isArray(candidates) || !candidates.length || !isRecord(candidates[0])) {
+    throw new Error("Gemini response did not contain a candidate.");
+  }
+
+  const content = isRecord(candidates[0].content) ? candidates[0].content : null;
+  const parts = content && Array.isArray(content.parts) ? content.parts : null;
+  if (!parts?.length || !isRecord(parts[0]) || typeof parts[0].text !== "string") {
+    throw new Error("Gemini response did not contain JSON text.");
+  }
+
+  return parseJsonObject(parts[0].text);
 };
 
 const callAnthropicJson = async ({
@@ -392,6 +493,7 @@ const callStructuredModel = async ({
   switch (planner.providerKey) {
     case "openai":
     case "grok":
+    case "ollama":
       return callOpenAiCompatibleJson({
         integration: planner.integration,
         providerKey: planner.providerKey,
@@ -402,6 +504,13 @@ const callStructuredModel = async ({
       });
     case "anthropic":
       return callAnthropicJson({
+        integration: planner.integration,
+        schema,
+        systemPrompt,
+        userPrompt,
+      });
+    case "gemini":
+      return callGeminiJson({
         integration: planner.integration,
         schema,
         systemPrompt,
@@ -426,7 +535,7 @@ const toPlannerModelIntegration = (
   }
 
   const providerKey = integration.providerKey as ModelProviderKey;
-  if (!extractApiKey(integration)) {
+  if (providerKey !== "ollama" && !extractApiKey(integration)) {
     return null;
   }
 
@@ -592,7 +701,10 @@ export const testPlannerModelIntegration = async (integration: OrganizationInteg
   if (!planner) {
     return {
       healthy: false,
-      error: "Model integration is missing a usable apiKey.",
+      error:
+        integration.providerKey === "ollama"
+          ? "Model integration is missing a usable local Ollama endpoint."
+          : "Model integration is missing a usable apiKey.",
       modelProviderKey: integration.providerKey,
       modelName: null,
     };

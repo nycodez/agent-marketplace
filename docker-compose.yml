@@ -29,6 +29,25 @@ services:
       timeout: 5s
       retries: 20
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    restart: "no"
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: >
+      sh -lc "until ollama list >/dev/null 2>&1; do sleep 2; done;
+      ollama pull qwen2.5:0.5b"
+
   temporal:
     image: temporalio/auto-setup:1.26.2
     restart: unless-stopped
@@ -179,3 +198,4 @@ volumes:
   worker_web_node_modules:
   worker_api_node_modules:
   worker_worker_node_modules:
+  ollama_data:

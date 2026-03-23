@@ -44,7 +44,13 @@ export const publicationStatusSchema = z.enum([
   "failed",
 ]);
 export const plannerModeSchema = z.enum(["llm", "fallback"]);
-export const modelProviderKeySchema = z.enum(["openai", "anthropic", "grok"]);
+export const modelProviderKeySchema = z.enum([
+  "openai",
+  "anthropic",
+  "grok",
+  "gemini",
+  "ollama",
+]);
 export const orchestrationEngineSchema = z.enum(["temporal"]);
 export const orchestrationStatusSchema = z.enum([
   "scheduled",

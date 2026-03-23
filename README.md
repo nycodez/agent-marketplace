@@ -6,6 +6,8 @@ Temporal is the orchestration boundary for agent runs and publication flows.
 
 Slack is a first-class communication integration: install it once at the organization level, grant scoped Slack tools to specific agents, and the run planner will only schedule Slack actions when both the install and the grant are present.
 
+Model providers can be customer-owned paid APIs or a free local Ollama connection. The default local Docker option runs `qwen2.5:0.5b` through Ollama for low-cost planning and drafting.
+
 ## Workspace
 
 - `apps/web`: Next.js product UI
@@ -46,8 +48,9 @@ That brings up:
 - `web` on `http://localhost:3000`
 - `api` on `http://localhost:4001`
 - `Temporal UI` on `http://localhost:8080`
-- `postgres` on `localhost:5432`
+- `postgres` on `localhost:55432`
 - `redis` on `localhost:6379`
+- `ollama` on `http://localhost:11434`
 
 Useful commands:
 
@@ -76,7 +79,7 @@ The product uses a strict monochrome theme:
 
 ## Status
 
-This initial implementation provides the repo structure, core contracts, a bootstrap API with in-memory persistence, Temporal worker scaffolding, containerized local startup, and a Next.js app shell wired to the same domain model. PostgreSQL and Redis remain the intended production infrastructure and are represented in the shared config and compose stack.
+This implementation now includes PostgreSQL-backed API persistence, Temporal worker orchestration, containerized local startup, provider-specific integration flows, and both paid and local model-provider options. Some provider execution adapters are still scaffolded, but the app is no longer using an in-memory-only API store.
 
 ## Migrations
 
