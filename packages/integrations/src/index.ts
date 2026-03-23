@@ -61,6 +61,9 @@ export const integrationProviders: IntegrationProvider[] = [
 export const findIntegrationProvider = (key: string) =>
   integrationProviders.find((provider) => provider.key === key) ?? null;
 
+export const findIntegrationProviderDefinition = (key: string) =>
+  providerDefinitions.find((provider) => provider.key === key) ?? null;
+
 export const integrationToolDefinitions = new Map<string, IntegrationToolDefinition[]>(
   providerDefinitions.map((provider) => [provider.key, provider.toolDefinitions]),
 );
