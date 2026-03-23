@@ -56,12 +56,28 @@ services:
     ports:
       - "8080:8080"
 
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/agent_marketplace
+    command: >
+      sh -lc "CI=true pnpm install --no-frozen-lockfile &&
+      pnpm --filter @agent-marketplace/database migrate"
+
   api:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       temporal:
         condition: service_started
       postgres:
@@ -83,6 +99,9 @@ services:
       TEMPORAL_PUBLICATION_TASK_QUEUE: agent-marketplace-publications
     ports:
       - "4001:4001"
+    command: >
+      sh -lc "CI=true pnpm install --no-frozen-lockfile &&
+      pnpm --filter @agent-marketplace/api dev"
     volumes:
       - .:/workspace
       - api_node_modules:/workspace/node_modules
@@ -113,6 +132,9 @@ services:
       TEMPORAL_NAMESPACE: default
       TEMPORAL_RUN_TASK_QUEUE: agent-marketplace-runs
       TEMPORAL_PUBLICATION_TASK_QUEUE: agent-marketplace-publications
+    command: >
+      sh -lc "CI=true pnpm install --no-frozen-lockfile &&
+      pnpm --filter @agent-marketplace/worker dev"
     volumes:
       - .:/workspace
       - worker_node_modules:/workspace/node_modules
@@ -132,6 +154,9 @@ services:
       WEB_API_BASE_URL: http://localhost:4001
     ports:
       - "3000:3000"
+    command: >
+      sh -lc "CI=true pnpm install --no-frozen-lockfile &&
+      pnpm --filter @agent-marketplace/web dev:docker"
     volumes:
       - .:/workspace
       - web_node_modules:/workspace/node_modules
