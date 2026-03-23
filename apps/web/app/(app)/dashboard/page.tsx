@@ -17,7 +17,6 @@ export default function DashboardPage() {
           <p className="eyebrow">Workspace dashboard</p>
           <h1>Agent Marketplace Control Room</h1>
         </div>
-        <StatusPill>Dark-first monochrome</StatusPill>
       </div>
 
       <section className="stats-grid">

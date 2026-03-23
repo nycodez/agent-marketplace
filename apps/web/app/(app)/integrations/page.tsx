@@ -1,7 +1,10 @@
+import Link from "next/link";
 import { MonochromeButton, SectionCard, StatusPill } from "@agent-marketplace/ui";
 import { agents, integrations, toolGrants } from "../../../lib/demo-data";
 
 export default function IntegrationsPage() {
+  const connectedIntegrations = integrations.filter((integration) => integration.status === "connected");
+
   return (
     <div className="stack">
       <div className="row-between">
@@ -9,7 +12,9 @@ export default function IntegrationsPage() {
           <p className="eyebrow">Marketplace installs</p>
           <h1>Organization integrations</h1>
         </div>
-        <MonochromeButton>Install provider</MonochromeButton>
+        <Link href="/integrations/connect" className="mono-button">
+          Connect integration
+        </Link>
       </div>
 
       <SectionCard title="Connected systems" eyebrow="Per-organization installs">
@@ -24,7 +29,7 @@ export default function IntegrationsPage() {
             </tr>
           </thead>
           <tbody>
-            {integrations.map((integration) => {
+            {connectedIntegrations.map((integration) => {
               const grants = toolGrants.filter(
                 (grant) => grant.organizationIntegrationId === integration.id,
               );
