@@ -1,0 +1,22 @@
+{
+  "name": "@agent-marketplace/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agent-marketplace/config": "workspace:*",
+    "@temporalio/activity": "^1.11.5",
+    "@temporalio/client": "^1.11.5",
+    "@temporalio/worker": "^1.11.5",
+    "@temporalio/workflow": "^1.11.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3"
+  }
+}

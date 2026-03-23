@@ -1,0 +1,1689 @@
+import {
+  createProgramFileInputSchema,
+  createDraftInputSchema,
+  installIntegrationInputSchema,
+  loginInputSchema,
+  magicLinkInputSchema,
+  publishProgramFileInputSchema,
+  registerInputSchema,
+  runCreateInputSchema,
+  type ProgramFile,
+  type PublicationRecord,
+  updateDraftInputSchema,
+  updateProgramFileInputSchema,
+  type AgentSpec,
+  type AgentSpecVersion,
+  type AgentTeamDraft,
+  type ApprovalRequest,
+  type OrganizationIntegration,
+  type Run,
+  type RunStep,
+} from "@agent-marketplace/contracts";
+import {
+  generateAgentDraftsFromBrief,
+  planPublication,
+  planRun,
+  publishAgentsFromDraft,
+} from "@agent-marketplace/agent-runtime";
+import { appConfig } from "@agent-marketplace/config";
+import { findIntegrationProvider, integrationProviders } from "@agent-marketplace/integrations";
+import type { FastifyInstance } from "fastify";
+import { createSession, hashPassword, requireSession, verifyPassword } from "../lib/auth.js";
+import {
+  cancelTemporalRunWorkflow,
+  signalTemporalRunApproval,
+  startTemporalPublicationWorkflow,
+  startTemporalRunWorkflow,
+} from "../lib/temporal.js";
+import {
+  createId,
+  createMembership,
+  getStore,
+  nowIso,
+  recordAuditEvent,
+} from "../services/store.js";
+
+const ok = <T>(data: T, meta?: Record<string, unknown>) => ({
+  success: true,
+  data,
+  meta,
+});
+
+const fail = (
+  field: string,
+  message: string,
+  rule = "validation",
+) => ({
+  success: false,
+  errors: [{ rule, field, message }],
+});
+
+const slugify = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const buildAgentVersion = ({
+  agentId,
+  workspaceId,
+  createdByUserId,
+  generatedAgent,
+  version,
+}: {
+  agentId: string;
+  workspaceId: string;
+  createdByUserId: string;
+  generatedAgent: AgentTeamDraft["generatedAgents"][number];
+  version: number;
+}): AgentSpecVersion => ({
+  id: createId("agent_version"),
+  agentId,
+  workspaceId,
+  version,
+  spec: generatedAgent,
+  createdByUserId,
+  createdAt: nowIso(),
+});
+
+const createPendingOrchestration = ({
+  workflowType,
+  taskQueue,
+}: {
+  workflowType: string;
+  taskQueue: string;
+}) => ({
+  engine: "temporal" as const,
+  workflowId: null,
+  workflowRunId: null,
+  workflowType,
+  taskQueue,
+  namespace: appConfig.temporalNamespace,
+  status: "scheduled" as const,
+  lastError: null,
+});
+
+const createProgramFilePublication = ({
+  programFile,
+  target,
+  organizationIntegrationId,
+  userId,
+}: {
+  programFile: ProgramFile;
+  target: "base" | "arweave";
+  organizationIntegrationId?: string | null;
+  userId: string;
+}): PublicationRecord => {
+  const integration =
+    (organizationIntegrationId
+      ? getStore().organizationIntegrations.find(
+          (candidate) =>
+            candidate.id === organizationIntegrationId &&
+            candidate.organizationId === programFile.organizationId &&
+            candidate.providerKey === target,
+        )
+      : getStore().organizationIntegrations.find(
+          (candidate) =>
+            candidate.organizationId === programFile.organizationId &&
+            candidate.providerKey === target &&
+            candidate.status === "connected",
+        )) ?? null;
+
+  const publication = planPublication({
+    programFile,
+    target,
+    integration,
+    userId,
+  });
+
+  return {
+    id: createId("publication"),
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    orchestration: createPendingOrchestration({
+      workflowType: "programPublicationWorkflow",
+      taskQueue: appConfig.temporalPublicationTaskQueue,
+    }),
+    ...publication,
+  };
+};
+
+export const registerRoutes = async (app: FastifyInstance) => {
+  app.get("/health", async () => ok({ status: "ok", service: "agent-marketplace-api" }));
+
+  app.post("/auth/register", async (request, reply) => {
+    const parsed = registerInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const store = getStore();
+    const existingUser = store.users.find((user) => user.email === parsed.data.email);
+    if (existingUser) {
+      return reply.code(409).send(fail("email", "An account with this email already exists.", "unique"));
+    }
+
+    const user = {
+      id: createId("user"),
+      email: parsed.data.email,
+      name: parsed.data.name,
+      passwordHash: hashPassword(parsed.data.password),
+      createdAt: nowIso(),
+    };
+    const organization = {
+      id: createId("org"),
+      name: parsed.data.organizationName,
+      slug: slugify(parsed.data.organizationName),
+      createdByUserId: user.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    const workspace = {
+      id: createId("workspace"),
+      organizationId: organization.id,
+      name: parsed.data.workspaceName ?? `${parsed.data.organizationName} Workspace`,
+      slug: slugify(parsed.data.workspaceName ?? `${parsed.data.organizationName} Workspace`),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    store.users.push(user);
+    store.organizations.push(organization);
+    store.workspaces.push(workspace);
+    createMembership({
+      userId: user.id,
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      role: "owner",
+    });
+    const session = createSession({
+      user,
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+    });
+
+    recordAuditEvent({
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+      eventType: "auth.registered",
+      entityType: "user",
+      entityId: user.id,
+      payload: {
+        email: user.email,
+      },
+    });
+
+    return reply.code(201).send(
+      ok({
+        token: session.token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          createdAt: user.createdAt,
+        },
+        organization,
+        workspace,
+      }),
+    );
+  });
+
+  app.post("/auth/login", async (request, reply) => {
+    const parsed = loginInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const store = getStore();
+    const user = store.users.find((candidate) => candidate.email === parsed.data.email) ?? null;
+
+    if (!user || !verifyPassword(parsed.data.password, user.passwordHash)) {
+      return reply.code(401).send(fail("password", "Invalid email or password.", "auth"));
+    }
+
+    const membership = store.memberships.find((candidate) => candidate.userId === user.id) ?? null;
+    if (!membership) {
+      return reply.code(403).send(fail("membership", "No workspace membership found.", "auth"));
+    }
+
+    const session = createSession({
+      user,
+      organizationId: membership.organizationId,
+      workspaceId: membership.workspaceId,
+    });
+
+    return reply.send(
+      ok({
+        token: session.token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          createdAt: user.createdAt,
+        },
+        organizationId: membership.organizationId,
+        workspaceId: membership.workspaceId,
+      }),
+    );
+  });
+
+  app.post("/auth/magic-link", async (request, reply) => {
+    const parsed = magicLinkInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const store = getStore();
+    let user = store.users.find((candidate) => candidate.email === parsed.data.email) ?? null;
+
+    if (!user) {
+      if (!parsed.data.name || !parsed.data.organizationName) {
+        return reply.code(422).send(
+          fail("email", "New magic-link signups require name and organizationName."),
+        );
+      }
+
+      user = {
+        id: createId("user"),
+        email: parsed.data.email,
+        name: parsed.data.name,
+        passwordHash: hashPassword(createId("magic")),
+        createdAt: nowIso(),
+      };
+      const organization = {
+        id: createId("org"),
+        name: parsed.data.organizationName,
+        slug: slugify(parsed.data.organizationName),
+        createdByUserId: user.id,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      };
+      const workspace = {
+        id: createId("workspace"),
+        organizationId: organization.id,
+        name: `${parsed.data.organizationName} Workspace`,
+        slug: slugify(`${parsed.data.organizationName} Workspace`),
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      };
+      store.users.push(user);
+      store.organizations.push(organization);
+      store.workspaces.push(workspace);
+      createMembership({
+        userId: user.id,
+        organizationId: organization.id,
+        workspaceId: workspace.id,
+        role: "owner",
+      });
+    }
+
+    const membership = store.memberships.find((candidate) => candidate.userId === user.id);
+    if (!membership) {
+      return reply.code(403).send(fail("membership", "No workspace membership found.", "auth"));
+    }
+
+    const session = createSession({
+      user,
+      organizationId: membership.organizationId,
+      workspaceId: membership.workspaceId,
+    });
+
+    return reply.send(
+      ok({
+        token: session.token,
+        sent: true,
+      }),
+    );
+  });
+
+  app.post("/auth/logout", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const store = getStore();
+    store.sessions = store.sessions.filter((session) => session.token !== authContext.session.token);
+    return reply.send(ok({ loggedOut: true }));
+  });
+
+  app.get("/me", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const membership = getStore().memberships.find(
+      (candidate) =>
+        candidate.userId === authContext.user.id &&
+        candidate.organizationId === authContext.organization.id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+
+    return reply.send(
+      ok({
+        user: {
+          id: authContext.user.id,
+          email: authContext.user.email,
+          name: authContext.user.name,
+          createdAt: authContext.user.createdAt,
+        },
+        organization: authContext.organization,
+        workspace: authContext.workspace,
+        membership,
+      }),
+    );
+  });
+
+  app.get("/organizations", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const organizations = getStore().memberships
+      .filter((membership) => membership.userId === authContext.user.id)
+      .map((membership) =>
+        getStore().organizations.find((organization) => organization.id === membership.organizationId),
+      )
+      .filter(Boolean);
+
+    return reply.send(ok(organizations));
+  });
+
+  app.post("/organizations", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ name: string; workspaceName: string }>;
+    if (!payload?.name?.trim()) {
+      return reply.code(422).send(fail("name", "Organization name is required."));
+    }
+
+    const organization = {
+      id: createId("org"),
+      name: payload.name.trim(),
+      slug: slugify(payload.name),
+      createdByUserId: authContext.user.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    const workspace = {
+      id: createId("workspace"),
+      organizationId: organization.id,
+      name: payload.workspaceName?.trim() || `${payload.name.trim()} Workspace`,
+      slug: slugify(payload.workspaceName?.trim() || `${payload.name.trim()} Workspace`),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    getStore().organizations.push(organization);
+    getStore().workspaces.push(workspace);
+    createMembership({
+      userId: authContext.user.id,
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      role: "owner",
+    });
+
+    recordAuditEvent({
+      organizationId: organization.id,
+      workspaceId: workspace.id,
+      userId: authContext.user.id,
+      eventType: "organization.created",
+      entityType: "organization",
+      entityId: organization.id,
+      payload: {
+        workspaceId: workspace.id,
+      },
+    });
+
+    return reply.code(201).send(ok({ organization, workspace }));
+  });
+
+  app.patch("/organizations", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ name: string }>;
+    if (!payload?.name?.trim()) {
+      return reply.code(422).send(fail("name", "Organization name is required."));
+    }
+
+    authContext.organization.name = payload.name.trim();
+    authContext.organization.slug = slugify(payload.name);
+    authContext.organization.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "organization.updated",
+      entityType: "organization",
+      entityId: authContext.organization.id,
+      payload: {
+        name: authContext.organization.name,
+      },
+    });
+
+    return reply.send(ok(authContext.organization));
+  });
+
+  app.get("/workspaces", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const workspaces = getStore().workspaces.filter(
+      (workspace) => workspace.organizationId === authContext.organization.id,
+    );
+
+    return reply.send(ok(workspaces));
+  });
+
+  app.post("/workspaces", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ name: string }>;
+    if (!payload?.name?.trim()) {
+      return reply.code(422).send(fail("name", "Workspace name is required."));
+    }
+
+    const workspace = {
+      id: createId("workspace"),
+      organizationId: authContext.organization.id,
+      name: payload.name.trim(),
+      slug: slugify(payload.name),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    getStore().workspaces.push(workspace);
+    createMembership({
+      userId: authContext.user.id,
+      organizationId: authContext.organization.id,
+      workspaceId: workspace.id,
+      role: "owner",
+    });
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: workspace.id,
+      userId: authContext.user.id,
+      eventType: "workspace.created",
+      entityType: "workspace",
+      entityId: workspace.id,
+      payload: workspace,
+    });
+
+    return reply.code(201).send(ok(workspace));
+  });
+
+  app.patch("/workspaces", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ name: string }>;
+    if (!payload?.name?.trim()) {
+      return reply.code(422).send(fail("name", "Workspace name is required."));
+    }
+
+    authContext.workspace.name = payload.name.trim();
+    authContext.workspace.slug = slugify(payload.name);
+    authContext.workspace.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "workspace.updated",
+      entityType: "workspace",
+      entityId: authContext.workspace.id,
+      payload: {
+        name: authContext.workspace.name,
+      },
+    });
+
+    return reply.send(ok(authContext.workspace));
+  });
+
+  app.get("/members", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const members = getStore().memberships
+      .filter((membership) => membership.workspaceId === authContext.workspace.id)
+      .map((membership) => ({
+        ...membership,
+        user: getStore().users.find((user) => user.id === membership.userId),
+      }));
+
+    return reply.send(ok(members));
+  });
+
+  app.post("/members", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ email: string; name: string; role: "admin" | "builder" | "operator" | "viewer" }>;
+    if (!payload?.email?.trim() || !payload?.name?.trim() || !payload.role) {
+      return reply.code(422).send(fail("member", "email, name, and role are required."));
+    }
+
+    const store = getStore();
+    let user = store.users.find((candidate) => candidate.email === payload.email.trim()) ?? null;
+    if (!user) {
+      user = {
+        id: createId("user"),
+        email: payload.email.trim(),
+        name: payload.name.trim(),
+        passwordHash: hashPassword(createId("invite")),
+        createdAt: nowIso(),
+      };
+      store.users.push(user);
+    }
+
+    const membership = createMembership({
+      userId: user.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      role: payload.role,
+    });
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "member.invited",
+      entityType: "membership",
+      entityId: membership.id,
+      payload: {
+        invitedUserId: user.id,
+        role: membership.role,
+      },
+    });
+
+    return reply.code(201).send(ok({ ...membership, user }));
+  });
+
+  app.patch("/members", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{ membershipId: string; role: "admin" | "builder" | "operator" | "viewer" }>;
+    if (!payload?.membershipId || !payload.role) {
+      return reply.code(422).send(fail("membershipId", "membershipId and role are required."));
+    }
+
+    const membership = getStore().memberships.find(
+      (candidate) =>
+        candidate.id === payload.membershipId && candidate.workspaceId === authContext.workspace.id,
+    );
+
+    if (!membership) {
+      return reply.code(404).send(fail("membershipId", "Membership not found.", "exists"));
+    }
+
+    membership.role = payload.role;
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "member.updated",
+      entityType: "membership",
+      entityId: membership.id,
+      payload: {
+        role: membership.role,
+      },
+    });
+
+    return reply.send(ok(membership));
+  });
+
+  app.get("/integration-providers", async () => ok(integrationProviders));
+
+  app.get("/organization-integrations", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const installations = getStore().organizationIntegrations.filter(
+      (candidate) => candidate.organizationId === authContext.organization.id,
+    );
+
+    return reply.send(ok(installations));
+  });
+
+  app.post("/organization-integrations/:provider/install", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const provider = findIntegrationProvider((request.params as { provider: string }).provider);
+    if (!provider) {
+      return reply.code(404).send(fail("provider", "Integration provider not found.", "exists"));
+    }
+
+    const parsed = installIntegrationInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const installation: OrganizationIntegration = {
+      id: createId("integration"),
+      organizationId: authContext.organization.id,
+      providerKey: provider.key,
+      displayName: parsed.data.displayName,
+      status: provider.authType === "webhook" ? "connected" : "pending",
+      authType: provider.authType,
+      scopes: parsed.data.scopes,
+      metadata: parsed.data.metadata,
+      createdByUserId: authContext.user.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      lastValidatedAt: null,
+    };
+
+    getStore().organizationIntegrations.push(installation);
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "integration.installed",
+      entityType: "organization_integration",
+      entityId: installation.id,
+      payload: {
+        providerKey: provider.key,
+        scopes: installation.scopes,
+      },
+    });
+
+    return reply.code(201).send(
+      ok(installation, {
+        nextAction:
+          provider.setupMode === "oauth"
+            ? "Complete the OAuth callback to finish setup."
+            : provider.setupMode === "api_key"
+              ? "Store and verify the API key out of band."
+              : provider.setupMode === "wallet"
+                ? "Connect a publishing wallet or signer, then verify the install."
+                : "Send events to the webhook endpoint to activate runs.",
+      }),
+    );
+  });
+
+  app.post("/organization-integrations/:id/oauth/callback", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.organizationId === authContext.organization.id,
+    );
+
+    if (!integration) {
+      return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    integration.status = "connected";
+    integration.lastValidatedAt = nowIso();
+    integration.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "integration.oauth_completed",
+      entityType: "organization_integration",
+      entityId: integration.id,
+      payload: {
+        providerKey: integration.providerKey,
+      },
+    });
+
+    return reply.send(ok(integration));
+  });
+
+  app.post("/organization-integrations/:id/test", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.organizationId === authContext.organization.id,
+    );
+    if (!integration) {
+      return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
+    }
+
+    integration.status = "connected";
+    integration.lastValidatedAt = nowIso();
+    integration.updatedAt = nowIso();
+
+    return reply.send(
+      ok({
+        integration,
+        healthy: true,
+      }),
+    );
+  });
+
+  app.get("/program-files", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const programFiles = getStore().programFiles.filter(
+      (candidate) => candidate.workspaceId === authContext.workspace.id,
+    );
+
+    return reply.send(ok(programFiles));
+  });
+
+  app.post("/program-files", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createProgramFileInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const programFile: ProgramFile = {
+      id: createId("program_file"),
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      agentId: parsed.data.agentId ?? null,
+      name: parsed.data.name,
+      description: parsed.data.description ?? null,
+      sourceType: parsed.data.sourceType,
+      content: parsed.data.content,
+      tags: parsed.data.tags,
+      createdByUserId: authContext.user.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    getStore().programFiles.unshift(programFile);
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "program_file.created",
+      entityType: "program_file",
+      entityId: programFile.id,
+      payload: {
+        sourceType: programFile.sourceType,
+        agentId: programFile.agentId,
+      },
+    });
+
+    return reply.code(201).send(ok(programFile));
+  });
+
+  app.get("/program-files/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const programFile = getStore().programFiles.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!programFile) {
+      return reply.code(404).send(fail("id", "Program file not found.", "exists"));
+    }
+
+    const publications = getStore().publicationRecords.filter(
+      (candidate) => candidate.programFileId === programFile.id,
+    );
+
+    return reply.send(ok({ programFile, publications }));
+  });
+
+  app.patch("/program-files/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = updateProgramFileInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const programFile = getStore().programFiles.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!programFile) {
+      return reply.code(404).send(fail("id", "Program file not found.", "exists"));
+    }
+
+    if (parsed.data.name !== undefined) {
+      programFile.name = parsed.data.name;
+    }
+    if (parsed.data.description !== undefined) {
+      programFile.description = parsed.data.description ?? null;
+    }
+    if (parsed.data.agentId !== undefined) {
+      programFile.agentId = parsed.data.agentId ?? null;
+    }
+    if (parsed.data.sourceType !== undefined) {
+      programFile.sourceType = parsed.data.sourceType;
+    }
+    if (parsed.data.content !== undefined) {
+      programFile.content = parsed.data.content;
+    }
+    if (parsed.data.tags !== undefined) {
+      programFile.tags = parsed.data.tags;
+    }
+    programFile.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "program_file.updated",
+      entityType: "program_file",
+      entityId: programFile.id,
+      payload: {
+        sourceType: programFile.sourceType,
+      },
+    });
+
+    return reply.send(ok(programFile));
+  });
+
+  app.get("/program-files/:id/publications", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const programFile = getStore().programFiles.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!programFile) {
+      return reply.code(404).send(fail("id", "Program file not found.", "exists"));
+    }
+
+    const publications = getStore().publicationRecords.filter(
+      (candidate) => candidate.programFileId === programFile.id,
+    );
+
+    return reply.send(ok(publications));
+  });
+
+  app.post("/program-files/:id/publish/:target", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const params = request.params as { id: string; target: string };
+    if (params.target !== "base" && params.target !== "arweave") {
+      return reply.code(422).send(fail("target", "Publishing target must be base or arweave."));
+    }
+
+    const parsed = publishProgramFileInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const programFile = getStore().programFiles.find(
+      (candidate) => candidate.id === params.id && candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!programFile) {
+      return reply.code(404).send(fail("id", "Program file not found.", "exists"));
+    }
+
+    const publication = createProgramFilePublication({
+      programFile,
+      target: params.target,
+      organizationIntegrationId: parsed.data.organizationIntegrationId ?? null,
+      userId: authContext.user.id,
+    });
+
+    if (Object.keys(parsed.data.metadata).length) {
+      publication.metadata = {
+        ...publication.metadata,
+        ...parsed.data.metadata,
+      };
+    }
+
+    publication.orchestration = await startTemporalPublicationWorkflow({
+      publicationId: publication.id,
+      programFileId: programFile.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      target: params.target,
+      programName: programFile.name,
+    });
+    publication.status =
+      publication.orchestration.status === "started"
+        ? "processing"
+        : publication.orchestration.status === "unavailable"
+          ? "queued"
+          : publication.status;
+    publication.updatedAt = nowIso();
+
+    getStore().publicationRecords.unshift(publication);
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: `program_file.published.${params.target}`,
+      entityType: "publication_record",
+      entityId: publication.id,
+      payload: {
+        programFileId: programFile.id,
+        status: publication.status,
+        transactionId: publication.transactionId,
+        orchestration: publication.orchestration,
+      },
+    });
+
+    return reply.code(201).send(ok(publication));
+  });
+
+  app.get("/agent-team-drafts", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const drafts = getStore().drafts.filter((draft) => draft.workspaceId === authContext.workspace.id);
+    return reply.send(ok(drafts));
+  });
+
+  app.post("/agent-team-drafts", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createDraftInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const draft: AgentTeamDraft = {
+      id: createId("draft"),
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      title: parsed.data.title,
+      brief: parsed.data.brief,
+      status: "draft",
+      clarifications: [],
+      generatedAgents: [],
+      createdByUserId: authContext.user.id,
+      updatedByUserId: authContext.user.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    getStore().drafts.unshift(draft);
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "draft.created",
+      entityType: "agent_team_draft",
+      entityId: draft.id,
+      payload: {
+        title: draft.title,
+      },
+    });
+
+    return reply.code(201).send(ok(draft));
+  });
+
+  app.patch("/agent-team-drafts", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as { draftId?: string } & Record<string, unknown>;
+    if (!payload.draftId) {
+      return reply.code(422).send(fail("draftId", "draftId is required."));
+    }
+
+    const parsed = updateDraftInputSchema.safeParse(payload);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const draft = getStore().drafts.find(
+      (candidate) => candidate.id === payload.draftId && candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!draft) {
+      return reply.code(404).send(fail("draftId", "Draft not found.", "exists"));
+    }
+
+    if (parsed.data.title) {
+      draft.title = parsed.data.title;
+    }
+    if (parsed.data.brief) {
+      draft.brief = parsed.data.brief;
+    }
+    if (parsed.data.generatedAgents) {
+      draft.generatedAgents = parsed.data.generatedAgents;
+    }
+    draft.updatedByUserId = authContext.user.id;
+    draft.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "draft.updated",
+      entityType: "agent_team_draft",
+      entityId: draft.id,
+      payload: {
+        title: draft.title,
+      },
+    });
+
+    return reply.send(ok(draft));
+  });
+
+  app.post("/agent-team-drafts/:id/generate", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const draft = getStore().drafts.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!draft) {
+      return reply.code(404).send(fail("id", "Draft not found.", "exists"));
+    }
+
+    const generated = generateAgentDraftsFromBrief(draft.brief);
+    draft.generatedAgents = generated.generatedAgents;
+    draft.clarifications = generated.clarifications;
+    draft.status = "generated";
+    draft.updatedByUserId = authContext.user.id;
+    draft.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "draft.generated",
+      entityType: "agent_team_draft",
+      entityId: draft.id,
+      payload: {
+        generatedAgentCount: draft.generatedAgents.length,
+      },
+    });
+
+    return reply.send(ok(draft));
+  });
+
+  app.post("/agent-team-drafts/:id/publish", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const draft = getStore().drafts.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!draft) {
+      return reply.code(404).send(fail("id", "Draft not found.", "exists"));
+    }
+    if (!draft.generatedAgents.length) {
+      return reply.code(422).send(fail("generatedAgents", "Generate the draft before publishing."));
+    }
+
+    const publishedSpecs = publishAgentsFromDraft(draft);
+    const agents: AgentSpec[] = publishedSpecs.map((spec, index) => {
+      const agentId = createId("agent");
+      const version = buildAgentVersion({
+        agentId,
+        workspaceId: draft.workspaceId,
+        createdByUserId: authContext.user.id,
+        generatedAgent: draft.generatedAgents[index],
+        version: 1,
+      });
+      getStore().agentVersions.push(version);
+
+      return {
+        id: agentId,
+        currentVersionId: version.id,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        ...spec,
+      };
+    });
+
+    getStore().agents.unshift(...agents);
+    draft.status = "published";
+    draft.updatedByUserId = authContext.user.id;
+    draft.updatedAt = nowIso();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "draft.published",
+      entityType: "agent_team_draft",
+      entityId: draft.id,
+      payload: {
+        agentIds: agents.map((agent) => agent.id),
+      },
+    });
+
+    return reply.send(ok(agents));
+  });
+
+  app.get("/agents", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const agents = getStore().agents.filter((agent) => agent.workspaceId === authContext.workspace.id);
+    return reply.send(ok(agents));
+  });
+
+  app.post("/agents", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<{
+      displayName: string;
+      mission: string;
+      responsibilities: string[];
+      allowedTools: string[];
+      knowledgeSources: string[];
+      triggerModes: Array<"manual" | "scheduled" | "webhook" | "integration_event">;
+      approvalPolicy: "required" | "not_required";
+      successMetrics: string[];
+      constraints: string[];
+    }>;
+    if (!payload.displayName?.trim() || !payload.mission?.trim()) {
+      return reply.code(422).send(fail("displayName", "displayName and mission are required."));
+    }
+
+    const draftAgent = {
+      id: createId("draft_agent"),
+      roleName: payload.displayName.trim(),
+      mission: payload.mission.trim(),
+      responsibilities: payload.responsibilities ?? [],
+      allowedTools: payload.allowedTools ?? [],
+      knowledgeSources: payload.knowledgeSources ?? ["workspace brief"],
+      triggerModes: payload.triggerModes ?? ["manual"],
+      approvalPolicy: payload.approvalPolicy ?? "required",
+      successMetrics: payload.successMetrics ?? [],
+      constraints: payload.constraints ?? [],
+    };
+    const agentId = createId("agent");
+    const version = buildAgentVersion({
+      agentId,
+      workspaceId: authContext.workspace.id,
+      createdByUserId: authContext.user.id,
+      generatedAgent: draftAgent,
+      version: 1,
+    });
+    const agent: AgentSpec = {
+      id: agentId,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      displayName: draftAgent.roleName,
+      mission: draftAgent.mission,
+      responsibilities: draftAgent.responsibilities,
+      allowedTools: draftAgent.allowedTools,
+      knowledgeSources: draftAgent.knowledgeSources,
+      triggerModes: draftAgent.triggerModes,
+      approvalPolicy: draftAgent.approvalPolicy,
+      successMetrics: draftAgent.successMetrics,
+      constraints: draftAgent.constraints,
+      status: "active",
+      currentVersionId: version.id,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+
+    getStore().agentVersions.push(version);
+    getStore().agents.unshift(agent);
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "agent.created",
+      entityType: "agent",
+      entityId: agent.id,
+      payload: {
+        displayName: agent.displayName,
+      },
+    });
+
+    return reply.code(201).send(ok(agent));
+  });
+
+  app.patch("/agents", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const payload = request.body as Partial<AgentSpec> & { agentId?: string };
+    if (!payload.agentId) {
+      return reply.code(422).send(fail("agentId", "agentId is required."));
+    }
+
+    const agent = getStore().agents.find(
+      (candidate) => candidate.id === payload.agentId && candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!agent) {
+      return reply.code(404).send(fail("agentId", "Agent not found.", "exists"));
+    }
+
+    if (payload.displayName) {
+      agent.displayName = payload.displayName;
+    }
+    if (payload.mission) {
+      agent.mission = payload.mission;
+    }
+    if (payload.responsibilities) {
+      agent.responsibilities = payload.responsibilities;
+    }
+    if (payload.allowedTools) {
+      agent.allowedTools = payload.allowedTools;
+    }
+    if (payload.knowledgeSources) {
+      agent.knowledgeSources = payload.knowledgeSources;
+    }
+    if (payload.triggerModes) {
+      agent.triggerModes = payload.triggerModes;
+    }
+    if (payload.approvalPolicy) {
+      agent.approvalPolicy = payload.approvalPolicy;
+    }
+    if (payload.successMetrics) {
+      agent.successMetrics = payload.successMetrics;
+    }
+    if (payload.constraints) {
+      agent.constraints = payload.constraints;
+    }
+    agent.updatedAt = nowIso();
+
+    const version = buildAgentVersion({
+      agentId: agent.id,
+      workspaceId: agent.workspaceId,
+      createdByUserId: authContext.user.id,
+      generatedAgent: {
+        id: createId("draft_agent"),
+        roleName: agent.displayName,
+        mission: agent.mission,
+        responsibilities: agent.responsibilities,
+        allowedTools: agent.allowedTools,
+        knowledgeSources: agent.knowledgeSources,
+        triggerModes: agent.triggerModes,
+        approvalPolicy: agent.approvalPolicy,
+        successMetrics: agent.successMetrics,
+        constraints: agent.constraints,
+      },
+      version:
+        getStore().agentVersions.filter((candidate) => candidate.agentId === agent.id).length + 1,
+    });
+    getStore().agentVersions.push(version);
+    agent.currentVersionId = version.id;
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "agent.updated",
+      entityType: "agent",
+      entityId: agent.id,
+      payload: {
+        version: version.version,
+      },
+    });
+
+    return reply.send(ok(agent));
+  });
+
+  app.get("/agents/:id/versions", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const versions = getStore().agentVersions.filter(
+      (candidate) => candidate.agentId === (request.params as { id: string }).id,
+    );
+    return reply.send(ok(versions));
+  });
+
+  app.post("/runs", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = runCreateInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const agent = getStore().agents.find(
+      (candidate) =>
+        candidate.id === parsed.data.agentId && candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!agent) {
+      return reply.code(404).send(fail("agentId", "Agent not found.", "exists"));
+    }
+
+    const integrations = getStore().organizationIntegrations.filter(
+      (integration) => integration.organizationId === authContext.organization.id,
+    );
+    const planned = planRun({
+      agent,
+      prompt: parsed.data.prompt,
+      integrations,
+      userId: authContext.user.id,
+    });
+
+    const runId = createId("run");
+    const approvalRequest: ApprovalRequest | null = planned.requestedActions.length
+      ? {
+          id: createId("approval"),
+          runId,
+          workspaceId: authContext.workspace.id,
+          status: "pending",
+          summary: `Review external actions for ${agent.displayName}`,
+          requestedActions: planned.requestedActions,
+          createdAt: nowIso(),
+          resolvedAt: null,
+        }
+      : null;
+
+    const run: Run = {
+      id: runId,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      approvalRequestId: approvalRequest?.id ?? null,
+      orchestration: createPendingOrchestration({
+        workflowType: "agentRunWorkflow",
+        taskQueue: appConfig.temporalRunTaskQueue,
+      }),
+      ...planned.run,
+      triggerType: parsed.data.triggerType,
+    };
+
+    const steps: RunStep[] = planned.steps.map((step) => ({
+      ...step,
+      id: createId("run_step"),
+      runId,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    }));
+
+    getStore().runs.unshift(run);
+    getStore().runSteps.unshift(...steps);
+    if (approvalRequest) {
+      getStore().approvalRequests.unshift(approvalRequest);
+    }
+
+    run.orchestration = await startTemporalRunWorkflow({
+      runId: run.id,
+      workspaceId: run.workspaceId,
+      organizationId: run.organizationId,
+      agentId: run.agentId,
+      approvalRequired: run.approvalRequirement === "required",
+      plannedActions: run.plannedActions,
+    });
+    run.updatedAt = nowIso();
+    if (run.orchestration.status === "started" && run.status !== "awaiting_approval") {
+      run.status = "queued";
+    }
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "run.created",
+      entityType: "run",
+      entityId: run.id,
+      payload: {
+        agentId: agent.id,
+        status: run.status,
+        orchestration: run.orchestration,
+      },
+    });
+
+    return reply.code(201).send(
+      ok({
+        run,
+        steps,
+        approvalRequest,
+      }),
+    );
+  });
+
+  app.get("/runs", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const runs = getStore().runs
+      .filter((run) => run.workspaceId === authContext.workspace.id)
+      .map((run) => ({
+        ...run,
+        agent: getStore().agents.find((agent) => agent.id === run.agentId) ?? null,
+        approvalRequest:
+          getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null,
+      }));
+
+    return reply.send(ok(runs));
+  });
+
+  app.get("/runs/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const run = getStore().runs.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!run) {
+      return reply.code(404).send(fail("id", "Run not found.", "exists"));
+    }
+
+    const steps = getStore().runSteps.filter((step) => step.runId === run.id);
+    const approvalRequest =
+      getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null;
+
+    return reply.send(ok({ run, steps, approvalRequest }));
+  });
+
+  app.post("/runs/:id/approve", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const run = getStore().runs.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!run) {
+      return reply.code(404).send(fail("id", "Run not found.", "exists"));
+    }
+
+    const approvalRequest =
+      getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null;
+    if (!approvalRequest) {
+      return reply.code(422).send(fail("approval", "This run does not require approval."));
+    }
+
+    approvalRequest.status = "approved";
+    approvalRequest.resolvedAt = nowIso();
+    run.status = "queued";
+    run.updatedAt = nowIso();
+
+    const pendingStep = getStore().runSteps.find(
+      (step) => step.runId === run.id && step.status === "queued",
+    );
+    if (pendingStep) {
+      pendingStep.status = "running";
+      pendingStep.output = "Approval granted. Temporal workflow resumed.";
+      pendingStep.updatedAt = nowIso();
+    }
+
+    if (run.orchestration.workflowId) {
+      const signalResult = await signalTemporalRunApproval({
+        workflowId: run.orchestration.workflowId,
+        approved: true,
+        resolvedByUserId: authContext.user.id,
+      });
+
+      if (!signalResult.success) {
+        run.orchestration.status = "failed_to_start";
+        run.orchestration.lastError = signalResult.error;
+      }
+    }
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "run.approved",
+      entityType: "run",
+      entityId: run.id,
+      payload: {
+        approvalRequestId: approvalRequest.id,
+        orchestration: run.orchestration,
+      },
+    });
+
+    return reply.send(ok({ run, approvalRequest }));
+  });
+
+  app.post("/runs/:id/cancel", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const run = getStore().runs.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!run) {
+      return reply.code(404).send(fail("id", "Run not found.", "exists"));
+    }
+
+    run.status = "cancelled";
+    run.updatedAt = nowIso();
+    if (run.orchestration.workflowId) {
+      const cancelResult = await cancelTemporalRunWorkflow(run.orchestration.workflowId);
+      if (!cancelResult.success) {
+        run.orchestration.lastError = cancelResult.error;
+      }
+    }
+    const activeSteps = getStore().runSteps.filter(
+      (step) => step.runId === run.id && (step.status === "queued" || step.status === "running"),
+    );
+    for (const step of activeSteps) {
+      step.status = "skipped";
+      step.output = "Cancelled by operator.";
+      step.updatedAt = nowIso();
+    }
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "run.cancelled",
+      entityType: "run",
+      entityId: run.id,
+      payload: {
+        orchestration: run.orchestration,
+      },
+    });
+
+    return reply.send(ok(run));
+  });
+
+  app.post("/events/webhooks/:provider", async (request, reply) => {
+    const provider = findIntegrationProvider((request.params as { provider: string }).provider);
+    if (!provider) {
+      return reply.code(404).send(fail("provider", "Integration provider not found.", "exists"));
+    }
+
+    return reply.code(202).send(
+      ok({
+        accepted: true,
+        provider: provider.key,
+        eventId: createId("event"),
+      }),
+    );
+  });
+
+  app.get("/audit-events", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const events = getStore().auditEvents.filter(
+      (event) =>
+        event.organizationId === authContext.organization.id &&
+        (!event.workspaceId || event.workspaceId === authContext.workspace.id),
+    );
+
+    return reply.send(ok(events));
+  });
+};
