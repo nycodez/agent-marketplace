@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { MonochromeButton, SectionCard, StatTile, StatusPill } from "@agent-marketplace/ui";
-import { draftPreview, overviewStats } from "../../lib/demo-data";
+import { marketingTeamExamples, overviewStats } from "../../lib/demo-data";
+import { MarketingTeamShowcase } from "../../components/marketing-team-showcase";
 import { ThemeToggle } from "../../components/theme-toggle";
 import { TypedTeamDraftExplainer } from "../../components/typed-team-draft-explainer";
 
@@ -53,20 +54,7 @@ export default function MarketingPage() {
           </div>
         </div>
         <div className="mono-panel stack">
-          <p className="eyebrow">Generated brief preview</p>
-          <h2>{draftPreview.title}</h2>
-          <p className="muted-copy">{draftPreview.brief}</p>
-          <div className="stack">
-            {draftPreview.generatedAgents.map((agent) => (
-              <div key={agent.id} className="agent-list__item">
-                <div className="agent-list__header">
-                  <strong>{agent.roleName}</strong>
-                  <StatusPill>{agent.approvalPolicy}</StatusPill>
-                </div>
-                <p className="agent-list__meta">{agent.mission}</p>
-              </div>
-            ))}
-          </div>
+          <MarketingTeamShowcase teams={marketingTeamExamples} />
         </div>
       </section>
 

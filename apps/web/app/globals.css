@@ -384,6 +384,48 @@ textarea {
   margin-bottom: 8px;
 }
 
+.team-showcase {
+  position: relative;
+}
+
+.team-showcase__header {
+  position: static;
+}
+
+.team-showcase__header > div:first-child {
+  min-width: 0;
+}
+
+.team-showcase__header h2 {
+  margin-bottom: 4px;
+}
+
+.team-showcase__title {
+  white-space: nowrap;
+}
+
+.team-showcase__controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.team-showcase__dot {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  background: transparent;
+  box-shadow: 2px 2px 0 0 var(--border);
+  cursor: pointer;
+}
+
+.team-showcase__dot.is-active {
+  background: var(--accent-primary);
+}
+
 .mono-input,
 .mono-textarea {
   width: 100%;

@@ -21,7 +21,7 @@ export const draftPreview: AgentTeamDraft = {
   id: "draft_demo",
   organizationId: "org_demo",
   workspaceId: "workspace_demo",
-  title: "Revenue Recovery Team",
+  title: "Revenue Recovery",
   brief:
     "We need a team that monitors inbound sales email, drafts next-step responses, updates CRM opportunities, and flags deals needing human approval before money-moving or customer-visible changes.",
   status: "generated",
@@ -62,6 +62,202 @@ export const draftPreview: AgentTeamDraft = {
   createdAt: "2026-03-23T09:00:00.000Z",
   updatedAt: "2026-03-23T09:10:00.000Z",
 };
+
+export const marketingTeamExamples: AgentTeamDraft[] = [
+  draftPreview,
+  {
+    id: "draft_demo_finance",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    title: "Payables & Receivables",
+    brief:
+      "We need a team that monitors vendor invoices, chases missing approvals, tracks receivables aging, drafts payment-status outreach, and escalates exceptions before cash flow problems compound.",
+    status: "generated",
+    clarifications: [
+      "Confirm which accounting system is authoritative for invoice status and payment aging.",
+    ],
+    generatedAgents: [
+      {
+        id: "draft_agent_ap",
+        roleName: "Accounts Payable Coordinator",
+        mission: "Keep vendor obligations moving without missing approvals or payment windows.",
+        responsibilities: [
+          "Review inbound invoices and approval gaps.",
+          "Prepare payment follow-ups and exception summaries.",
+        ],
+        allowedTools: ["gmail.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["workspace brief", "ERP export", "approval history"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Invoices cleared on time", "Approval lag reduced"],
+        constraints: ["Do not release payment instructions without approval."],
+      },
+      {
+        id: "draft_agent_ar",
+        roleName: "Receivables Operator",
+        mission: "Reduce aging receivables and surface collections risk early.",
+        responsibilities: [
+          "Track overdue balances and customer responses.",
+          "Prepare outreach drafts and escalation notes.",
+        ],
+        allowedTools: ["crm.contacts.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["aging report", "workspace brief", "customer ledger"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Aging reduced", "Collections touched on time"],
+        constraints: ["Escalate disputed balances before any external commitment."],
+      },
+    ],
+    createdByUserId: "user_demo",
+    updatedByUserId: "user_demo",
+    createdAt: "2026-03-23T09:12:00.000Z",
+    updatedAt: "2026-03-23T09:14:00.000Z",
+  },
+  {
+    id: "draft_demo_leasing",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    title: "Leasing & Renewals",
+    brief:
+      "We need a team that captures inbound leasing inquiries, qualifies prospects, prepares follow-up sequences, tracks upcoming expirations, and drafts renewal outreach before occupancy risk shows up in the numbers.",
+    status: "generated",
+    clarifications: [
+      "Confirm which PMS or CRM is authoritative for lease expiration dates and unit availability.",
+    ],
+    generatedAgents: [
+      {
+        id: "draft_agent_leasing",
+        roleName: "Leasing Coordinator",
+        mission: "Keep leasing inquiries moving from first contact to scheduled tour.",
+        responsibilities: [
+          "Review inbound prospects and lead sources.",
+          "Draft follow-ups and surface high-intent prospects quickly.",
+        ],
+        allowedTools: ["gmail.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["workspace brief", "lead inbox", "availability feed"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Time to first response", "Tours scheduled"],
+        constraints: ["Do not promise pricing or concessions without approval."],
+      },
+      {
+        id: "draft_agent_renewals",
+        roleName: "Renewal Operator",
+        mission: "Reduce renewal leakage by tracking expiring leases and preparing timely outreach.",
+        responsibilities: [
+          "Watch upcoming expirations and tenant response status.",
+          "Draft renewal reminders and escalation notes for at-risk residents.",
+        ],
+        allowedTools: ["crm.contacts.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["lease schedule", "workspace brief", "renewal history"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Renewal outreach on time", "At-risk leases escalated early"],
+        constraints: ["Escalate pricing changes before any customer-visible commitment."],
+      },
+    ],
+    createdByUserId: "user_demo",
+    updatedByUserId: "user_demo",
+    createdAt: "2026-03-23T09:16:00.000Z",
+    updatedAt: "2026-03-23T09:18:00.000Z",
+  },
+  {
+    id: "draft_demo_maintenance",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    title: "Maintenance Triage",
+    brief:
+      "We need a team that reviews maintenance requests, identifies emergencies, drafts resident updates, and escalates vendor dispatch issues before service levels slip.",
+    status: "generated",
+    clarifications: [
+      "Confirm which work-order system is authoritative for dispatch status and vendor assignment.",
+    ],
+    generatedAgents: [
+      {
+        id: "draft_agent_triage",
+        roleName: "Maintenance Intake Operator",
+        mission: "Classify incoming maintenance issues quickly and route urgent problems immediately.",
+        responsibilities: [
+          "Review inbound requests and categorize severity.",
+          "Prepare dispatch notes and resident-facing updates.",
+        ],
+        allowedTools: ["gmail.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["workspace brief", "ticket queue", "property rules"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Emergency response time", "Accurate first-pass classification"],
+        constraints: ["Escalate emergencies immediately and do not close requests without confirmation."],
+      },
+      {
+        id: "draft_agent_dispatch",
+        roleName: "Vendor Dispatch Coordinator",
+        mission: "Keep routine maintenance moving and surface vendor delays before residents feel them.",
+        responsibilities: [
+          "Track open work orders and vendor response gaps.",
+          "Prepare follow-ups for overdue dispatches and unresolved visits.",
+        ],
+        allowedTools: ["crm.tasks.write", "gmail.send", "slack.post"],
+        knowledgeSources: ["dispatch board", "vendor roster", "workspace brief"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Open work orders reduced", "Vendor delays escalated early"],
+        constraints: ["Do not mark work complete without confirmed resolution."],
+      },
+    ],
+    createdByUserId: "user_demo",
+    updatedByUserId: "user_demo",
+    createdAt: "2026-03-23T09:20:00.000Z",
+    updatedAt: "2026-03-23T09:22:00.000Z",
+  },
+  {
+    id: "draft_demo_collections",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    title: "Collections",
+    brief:
+      "We need a team that tracks delinquent balances, prioritizes accounts by risk and amount, drafts collection outreach, and escalates payment-plan or legal-review cases before receivables age out.",
+    status: "generated",
+    clarifications: [
+      "Confirm which ledger or property system is authoritative for delinquency status and promise-to-pay tracking.",
+    ],
+    generatedAgents: [
+      {
+        id: "draft_agent_collections",
+        roleName: "Collections Operator",
+        mission: "Keep delinquent accounts moving through structured outreach without losing track of risk.",
+        responsibilities: [
+          "Review aged balances and recent tenant responses.",
+          "Prepare outreach sequences and exception summaries.",
+        ],
+        allowedTools: ["gmail.read", "gmail.send", "slack.post"],
+        knowledgeSources: ["aging report", "workspace brief", "payment history"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Delinquent balances reduced", "High-risk accounts contacted on time"],
+        constraints: ["Escalate disputed balances and legal-risk cases before any firm commitment."],
+      },
+      {
+        id: "draft_agent_promises",
+        roleName: "Promise-to-Pay Tracker",
+        mission: "Monitor promised payments and escalate broken commitments before they roll into larger loss.",
+        responsibilities: [
+          "Track promise-to-pay dates and missed follow-through.",
+          "Prepare internal escalations and next-step reminders.",
+        ],
+        allowedTools: ["crm.tasks.write", "gmail.send", "slack.post"],
+        knowledgeSources: ["collections notes", "workspace brief", "tenant ledger"],
+        triggerModes: ["manual", "integration_event"],
+        approvalPolicy: "required",
+        successMetrics: ["Promises tracked on time", "Broken commitments escalated early"],
+        constraints: ["Do not approve concessions or settlements without human approval."],
+      },
+    ],
+    createdByUserId: "user_demo",
+    updatedByUserId: "user_demo",
+    createdAt: "2026-03-23T09:24:00.000Z",
+    updatedAt: "2026-03-23T09:26:00.000Z",
+  },
+];
 
 export const agents: AgentSpec[] = [
   {
