@@ -8,6 +8,7 @@ import type {
   PublicationRecord,
   Run,
   RunStep,
+  ToolGrant,
   TriggerType,
 } from "@agent-marketplace/contracts";
 import { writeScopedTools } from "@agent-marketplace/integrations";
@@ -134,28 +135,36 @@ export const planRun = ({
   agent,
   prompt,
   integrations,
+  toolGrants,
   userId,
 }: {
   agent: AgentSpec;
   prompt?: string;
   integrations: OrganizationIntegration[];
+  toolGrants: ToolGrant[];
   userId: string;
 }): {
   run: Omit<Run, "id" | "approvalRequestId" | "orchestration" | "createdAt" | "updatedAt">;
   steps: Array<Omit<RunStep, "id" | "createdAt" | "updatedAt">>;
   requestedActions: string[];
 } => {
+  const grantedTools = new Set(toolGrants.flatMap((grant) => grant.tools));
+  const executableTools = agent.allowedTools.filter((tool) => grantedTools.has(tool));
+  const missingGrantTools = agent.allowedTools.filter((tool) => !grantedTools.has(tool));
   const availableProviders = integrations.map((integration) => integration.providerKey).join(", ");
   const plannedActions = [
     `Review ${agent.displayName.toLowerCase()} mission and current task brief`,
     prompt ? `Use prompt context: ${prompt}` : "Use workspace brief and latest configuration",
-    `Operate with tools: ${agent.allowedTools.join(", ")}`,
+    `Operate with granted tools: ${executableTools.join(", ") || "none yet"}`,
     availableProviders
       ? `Cross-check available integrations: ${availableProviders}`
       : "No connected integrations yet; stay in planning mode",
+    missingGrantTools.length
+      ? `Do not use ungranted tools: ${missingGrantTools.join(", ")}`
+      : "All configured tools are granted for execution",
   ];
 
-  const requestedActions = agent.allowedTools
+  const requestedActions = executableTools
     .filter((tool) => writeScopedTools.has(tool))
     .map((tool) => `Execute tool ${tool} after approval`);
 
@@ -179,6 +188,8 @@ export const planRun = ({
       output: `Planned ${plannedActions.length} actions.`,
       metadata: {
         plannedActions,
+        executableTools,
+        missingGrantTools,
         generatedAt: nowIso(),
       },
     },
@@ -189,6 +200,8 @@ export const planRun = ({
       output: requestedActions.length ? null : "Execution can continue without approval.",
       metadata: {
         requestedActions,
+        executableTools,
+        missingGrantTools,
       },
     },
   ];
@@ -197,6 +210,20 @@ export const planRun = ({
     run,
     steps,
     requestedActions,
+  };
+};
+
+export const summarizeAgentTooling = ({
+  agent,
+  toolGrants,
+}: {
+  agent: AgentSpec;
+  toolGrants: ToolGrant[];
+}) => {
+  const grantedTools = new Set(toolGrants.flatMap((grant) => grant.tools));
+  return {
+    grantedTools: agent.allowedTools.filter((tool) => grantedTools.has(tool)),
+    missingGrantTools: agent.allowedTools.filter((tool) => !grantedTools.has(tool)),
   };
 };
 

@@ -1,5 +1,5 @@
 import { MonochromeButton, SectionCard, StatusPill } from "@agent-marketplace/ui";
-import { integrations } from "../../../lib/demo-data";
+import { agents, integrations, toolGrants } from "../../../lib/demo-data";
 
 export default function IntegrationsPage() {
   return (
@@ -20,19 +20,36 @@ export default function IntegrationsPage() {
               <th>Provider</th>
               <th>Status</th>
               <th>Scopes</th>
+              <th>Granted to agents</th>
             </tr>
           </thead>
           <tbody>
-            {integrations.map((integration) => (
-              <tr key={integration.id}>
-                <td>{integration.displayName}</td>
-                <td>{integration.providerKey}</td>
-                <td>
-                  <StatusPill>{integration.status}</StatusPill>
-                </td>
-                <td>{integration.scopes.join(", ")}</td>
-              </tr>
-            ))}
+            {integrations.map((integration) => {
+              const grants = toolGrants.filter(
+                (grant) => grant.organizationIntegrationId === integration.id,
+              );
+
+              return (
+                <tr key={integration.id}>
+                  <td>{integration.displayName}</td>
+                  <td>{integration.providerKey}</td>
+                  <td>
+                    <StatusPill>{integration.status}</StatusPill>
+                  </td>
+                  <td>{integration.scopes.join(", ")}</td>
+                  <td>
+                    {grants.length
+                      ? grants
+                          .map((grant) => {
+                            const agent = agents.find((candidate) => candidate.id === grant.agentId);
+                            return `${agent?.displayName ?? grant.agentId}: ${grant.tools.join(", ")}`;
+                          })
+                          .join(" · ")
+                      : "No agent grants yet"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </SectionCard>
@@ -46,11 +63,11 @@ export default function IntegrationsPage() {
             <li>Base and Arweave wallet installs for program publication.</li>
           </ul>
         </SectionCard>
-        <SectionCard title="Custom installs" eyebrow="Flexible">
+        <SectionCard title="Slack delivery model" eyebrow="Least privilege">
           <ul className="bullet-list">
-            <li>Generic API connectors using API keys.</li>
-            <li>Inbound webhooks for event-triggered runs.</li>
-            <li>Future support for provider-specific grant templates.</li>
+            <li>Slack is connected at the organization level and granted to agents per workspace.</li>
+            <li>The support agent can currently post to Slack after approval using the `slack.post` tool.</li>
+            <li>Additional Slack tools such as `slack.read` and `slack.thread` stay available on the install but ungranted until assigned.</li>
           </ul>
         </SectionCard>
       </section>

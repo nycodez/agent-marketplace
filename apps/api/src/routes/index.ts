@@ -1,4 +1,5 @@
 import {
+  createToolGrantInputSchema,
   createProgramFileInputSchema,
   createDraftInputSchema,
   installIntegrationInputSchema,
@@ -694,7 +695,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       displayName: parsed.data.displayName,
       status: provider.authType === "webhook" ? "connected" : "pending",
       authType: provider.authType,
-      scopes: parsed.data.scopes,
+      scopes: parsed.data.scopes.length ? parsed.data.scopes : provider.tools,
       metadata: parsed.data.metadata,
       createdByUserId: authContext.user.id,
       createdAt: nowIso(),
@@ -790,6 +791,160 @@ export const registerRoutes = async (app: FastifyInstance) => {
         healthy: true,
       }),
     );
+  });
+
+  app.get("/agents/:id/tool-grants", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const agent = getStore().agents.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!agent) {
+      return reply.code(404).send(fail("id", "Agent not found.", "exists"));
+    }
+
+    const grants = getStore().toolGrants
+      .filter((grant) => grant.agentId === agent.id && grant.workspaceId === authContext.workspace.id)
+      .map((grant) => ({
+        ...grant,
+        integration:
+          getStore().organizationIntegrations.find(
+            (integration) => integration.id === grant.organizationIntegrationId,
+          ) ?? null,
+      }));
+
+    return reply.send(ok(grants));
+  });
+
+  app.post("/agents/:id/tool-grants", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const agent = getStore().agents.find(
+      (candidate) =>
+        candidate.id === (request.params as { id: string }).id &&
+        candidate.workspaceId === authContext.workspace.id,
+    );
+    if (!agent) {
+      return reply.code(404).send(fail("id", "Agent not found.", "exists"));
+    }
+
+    const parsed = createToolGrantInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const integration = getStore().organizationIntegrations.find(
+      (candidate) =>
+        candidate.id === parsed.data.organizationIntegrationId &&
+        candidate.organizationId === authContext.organization.id,
+    );
+    if (!integration) {
+      return reply
+        .code(404)
+        .send(fail("organizationIntegrationId", "Integration installation not found.", "exists"));
+    }
+    if (integration.status !== "connected") {
+      return reply
+        .code(422)
+        .send(fail("organizationIntegrationId", "Integration must be connected before granting tools."));
+    }
+
+    const invalidTools = parsed.data.tools.filter(
+      (tool) => !integration.scopes.includes(tool) || !agent.allowedTools.includes(tool),
+    );
+    if (invalidTools.length) {
+      return reply.code(422).send(
+        fail(
+          "tools",
+          `These tools cannot be granted for this agent and integration: ${invalidTools.join(", ")}`,
+        ),
+      );
+    }
+
+    const existingGrant = getStore().toolGrants.find(
+      (grant) =>
+        grant.agentId === agent.id &&
+        grant.organizationIntegrationId === integration.id &&
+        grant.workspaceId === authContext.workspace.id,
+    );
+
+    const grant =
+      existingGrant ??
+      (() => {
+        const createdGrant = {
+          id: createId("tool_grant"),
+          workspaceId: authContext.workspace.id,
+          agentId: agent.id,
+          organizationIntegrationId: integration.id,
+          providerKey: integration.providerKey,
+          tools: [] as string[],
+          createdByUserId: authContext.user.id,
+          createdAt: nowIso(),
+        };
+        getStore().toolGrants.unshift(createdGrant);
+        return createdGrant;
+      })();
+
+    grant.tools = Array.from(new Set([...grant.tools, ...parsed.data.tools])).sort();
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "agent.tool_grant.updated",
+      entityType: "tool_grant",
+      entityId: grant.id,
+      payload: {
+        agentId: agent.id,
+        providerKey: grant.providerKey,
+        tools: grant.tools,
+      },
+    });
+
+    return reply.code(201).send(ok({ ...grant, integration }));
+  });
+
+  app.delete("/agents/:id/tool-grants/:grantId", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const params = request.params as { id: string; grantId: string };
+    const grantIndex = getStore().toolGrants.findIndex(
+      (grant) =>
+        grant.id === params.grantId &&
+        grant.agentId === params.id &&
+        grant.workspaceId === authContext.workspace.id,
+    );
+    if (grantIndex === -1) {
+      return reply.code(404).send(fail("grantId", "Tool grant not found.", "exists"));
+    }
+
+    const [removedGrant] = getStore().toolGrants.splice(grantIndex, 1);
+
+    recordAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "agent.tool_grant.deleted",
+      entityType: "tool_grant",
+      entityId: removedGrant.id,
+      payload: {
+        agentId: removedGrant.agentId,
+        providerKey: removedGrant.providerKey,
+      },
+    });
+
+    return reply.send(ok({ deleted: true }));
   });
 
   app.get("/program-files", async (request, reply) => {
@@ -1420,12 +1575,18 @@ export const registerRoutes = async (app: FastifyInstance) => {
     }
 
     const integrations = getStore().organizationIntegrations.filter(
-      (integration) => integration.organizationId === authContext.organization.id,
+      (integration) =>
+        integration.organizationId === authContext.organization.id &&
+        integration.status === "connected",
+    );
+    const toolGrants = getStore().toolGrants.filter(
+      (grant) => grant.agentId === agent.id && grant.workspaceId === authContext.workspace.id,
     );
     const planned = planRun({
       agent,
       prompt: parsed.data.prompt,
       integrations,
+      toolGrants,
       userId: authContext.user.id,
     });
 

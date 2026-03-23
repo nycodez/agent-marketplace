@@ -1,5 +1,12 @@
 import { MonochromeButton, SectionCard, StatusPill } from "@agent-marketplace/ui";
-import { agents, draftPreview } from "../../../lib/demo-data";
+import {
+  agents,
+  draftPreview,
+  getGrantedToolsForAgent,
+  getMissingToolsForAgent,
+  getToolGrantsForAgent,
+  integrations,
+} from "../../../lib/demo-data";
 
 export default function AgentsPage() {
   return (
@@ -46,18 +53,54 @@ export default function AgentsPage() {
               <th>Agent</th>
               <th>Status</th>
               <th>Triggers</th>
-              <th>Tools</th>
+              <th>Granted tools</th>
+              <th>Integration grants</th>
             </tr>
           </thead>
           <tbody>
-            {agents.map((agent) => (
-              <tr key={agent.id}>
-                <td>{agent.displayName}</td>
-                <td>{agent.status}</td>
-                <td>{agent.triggerModes.join(", ")}</td>
-                <td>{agent.allowedTools.join(", ")}</td>
-              </tr>
-            ))}
+            {agents.map((agent) => {
+              const grants = getToolGrantsForAgent(agent.id);
+              const grantedTools = getGrantedToolsForAgent(agent);
+              const missingTools = getMissingToolsForAgent(agent);
+
+              return (
+                <tr key={agent.id}>
+                  <td>
+                    <div className="stack">
+                      <strong>{agent.displayName}</strong>
+                      <span className="muted-copy">{agent.mission}</span>
+                    </div>
+                  </td>
+                  <td>{agent.status}</td>
+                  <td>{agent.triggerModes.join(", ")}</td>
+                  <td>
+                    <div className="stack">
+                      <span>{grantedTools.join(", ") || "No granted tools yet"}</span>
+                      <span className="muted-copy">
+                        {missingTools.length
+                          ? `Missing grants: ${missingTools.join(", ")}`
+                          : "All allowed tools are granted"}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="stack">
+                      {grants.map((grant) => {
+                        const integration = integrations.find(
+                          (candidate) => candidate.id === grant.organizationIntegrationId,
+                        );
+                        return (
+                          <span key={grant.id}>
+                            {(integration?.displayName ?? grant.providerKey) + ": "}
+                            {grant.tools.join(", ")}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </SectionCard>

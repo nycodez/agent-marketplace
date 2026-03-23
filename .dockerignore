@@ -1,0 +1,16 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+.next
+**/.next
+dist
+**/dist
+coverage
+**/coverage
+.turbo
+pnpm-lock.yaml
+.env
+.env.local
+.DS_Store
+

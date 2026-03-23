@@ -1,0 +1,156 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_marketplace
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_marketplace"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-bookworm
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.26.2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PWD: postgres
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/docker.yaml
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:4001
+    ports:
+      - "8080:8080"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 4001
+      APP_URL: http://localhost:3000
+      WEB_API_BASE_URL: http://localhost:4001
+      SESSION_SECRET: change-me
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/agent_marketplace
+      REDIS_URL: redis://redis:6379
+      TEMPORAL_ENABLED: "true"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_RUN_TASK_QUEUE: agent-marketplace-runs
+      TEMPORAL_PUBLICATION_TASK_QUEUE: agent-marketplace-publications
+    ports:
+      - "4001:4001"
+    volumes:
+      - .:/workspace
+      - api_node_modules:/workspace/node_modules
+      - api_web_node_modules:/workspace/apps/web/node_modules
+      - api_api_node_modules:/workspace/apps/api/node_modules
+      - api_worker_node_modules:/workspace/apps/worker/node_modules
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_started
+      api:
+        condition: service_started
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 4001
+      APP_URL: http://localhost:3000
+      WEB_API_BASE_URL: http://localhost:4001
+      SESSION_SECRET: change-me
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/agent_marketplace
+      REDIS_URL: redis://redis:6379
+      TEMPORAL_ENABLED: "true"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_RUN_TASK_QUEUE: agent-marketplace-runs
+      TEMPORAL_PUBLICATION_TASK_QUEUE: agent-marketplace-publications
+    volumes:
+      - .:/workspace
+      - worker_node_modules:/workspace/node_modules
+      - worker_web_node_modules:/workspace/apps/web/node_modules
+      - worker_api_node_modules:/workspace/apps/api/node_modules
+      - worker_worker_node_modules:/workspace/apps/worker/node_modules
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      WEB_API_BASE_URL: http://localhost:4001
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/workspace
+      - web_node_modules:/workspace/node_modules
+      - web_web_node_modules:/workspace/apps/web/node_modules
+      - web_api_node_modules:/workspace/apps/api/node_modules
+      - web_worker_node_modules:/workspace/apps/worker/node_modules
+
+volumes:
+  postgres_data:
+  redis_data:
+  web_node_modules:
+  web_web_node_modules:
+  web_api_node_modules:
+  web_worker_node_modules:
+  api_node_modules:
+  api_web_node_modules:
+  api_api_node_modules:
+  api_worker_node_modules:
+  worker_node_modules:
+  worker_web_node_modules:
+  worker_api_node_modules:
+  worker_worker_node_modules:

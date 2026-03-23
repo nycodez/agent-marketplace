@@ -7,13 +7,14 @@ import type {
   ProgramFile,
   PublicationRecord,
   Run,
+  ToolGrant,
 } from "@agent-marketplace/contracts";
 
 export const overviewStats = [
-  { label: "Live agents", value: 5, hint: "3 production, 2 staging" },
-  { label: "Pending approvals", value: 4, hint: "External writes waiting" },
-  { label: "Connected integrations", value: 6, hint: "Org-wide installs" },
-  { label: "Runs today", value: 28, hint: "Read-only and approval flows" },
+  { label: "Live agents", value: 2, hint: "2 published in this workspace" },
+  { label: "Pending approvals", value: 1, hint: "External writes waiting" },
+  { label: "Connected integrations", value: 5, hint: "Org-wide installs" },
+  { label: "Runs today", value: 2, hint: "1 completed, 1 awaiting approval" },
 ];
 
 export const draftPreview: AgentTeamDraft = {
@@ -49,7 +50,7 @@ export const draftPreview: AgentTeamDraft = {
       mission: "Summarize support threads and prepare customer-ready drafts.",
       responsibilities: ["Read email threads.", "Draft responses and hand off."],
       allowedTools: ["gmail.read", "gmail.send", "slack.post"],
-      knowledgeSources: ["workspace brief", "Gmail install"],
+      knowledgeSources: ["workspace brief", "Gmail install", "Slack install"],
       triggerModes: ["manual", "integration_event"],
       approvalPolicy: "required",
       successMetrics: ["Queue response time", "Draft acceptance rate"],
@@ -134,15 +135,15 @@ export const integrations: OrganizationIntegration[] = [
     id: "int_slack",
     organizationId: "org_demo",
     providerKey: "slack",
-    displayName: "Ops Slack",
-    status: "pending",
+    displayName: "Ops Slack Workspace",
+    status: "connected",
     authType: "oauth",
-    scopes: ["slack.post"],
-    metadata: { workspace: "ops" },
+    scopes: ["slack.read", "slack.post", "slack.thread"],
+    metadata: { workspace: "ops", defaultChannel: "#agent-ops" },
     createdByUserId: "user_demo",
     createdAt: "2026-03-23T08:55:00.000Z",
-    updatedAt: "2026-03-23T08:55:00.000Z",
-    lastValidatedAt: null,
+    updatedAt: "2026-03-23T09:05:00.000Z",
+    lastValidatedAt: "2026-03-23T09:05:00.000Z",
   },
   {
     id: "int_base",
@@ -266,6 +267,62 @@ export const publicationRecords: PublicationRecord[] = [
   },
 ];
 
+export const toolGrants: ToolGrant[] = [
+  {
+    id: "tool_grant_pipeline_hubspot",
+    workspaceId: "workspace_demo",
+    agentId: "agent_pipeline",
+    organizationIntegrationId: "int_hubspot",
+    providerKey: "hubspot",
+    tools: ["crm.contacts.read", "crm.tasks.write"],
+    createdByUserId: "user_demo",
+    createdAt: "2026-03-23T09:06:00.000Z",
+  },
+  {
+    id: "tool_grant_pipeline_google",
+    workspaceId: "workspace_demo",
+    agentId: "agent_pipeline",
+    organizationIntegrationId: "int_google",
+    providerKey: "google-workspace",
+    tools: ["gmail.send"],
+    createdByUserId: "user_demo",
+    createdAt: "2026-03-23T09:06:30.000Z",
+  },
+  {
+    id: "tool_grant_support_google",
+    workspaceId: "workspace_demo",
+    agentId: "agent_support",
+    organizationIntegrationId: "int_google",
+    providerKey: "google-workspace",
+    tools: ["gmail.read", "gmail.send"],
+    createdByUserId: "user_demo",
+    createdAt: "2026-03-23T09:07:00.000Z",
+  },
+  {
+    id: "tool_grant_support_slack",
+    workspaceId: "workspace_demo",
+    agentId: "agent_support",
+    organizationIntegrationId: "int_slack",
+    providerKey: "slack",
+    tools: ["slack.post"],
+    createdByUserId: "user_demo",
+    createdAt: "2026-03-23T09:07:30.000Z",
+  },
+];
+
+export const getToolGrantsForAgent = (agentId: string) =>
+  toolGrants.filter((grant) => grant.agentId === agentId);
+
+export const getGrantedToolsForAgent = (agent: AgentSpec) => {
+  const grantedTools = new Set(getToolGrantsForAgent(agent.id).flatMap((grant) => grant.tools));
+  return agent.allowedTools.filter((tool) => grantedTools.has(tool));
+};
+
+export const getMissingToolsForAgent = (agent: AgentSpec) => {
+  const grantedTools = new Set(getToolGrantsForAgent(agent.id).flatMap((grant) => grant.tools));
+  return agent.allowedTools.filter((tool) => !grantedTools.has(tool));
+};
+
 export const runs: Array<
   Run & {
     agentName: string;
@@ -368,16 +425,31 @@ export const auditEvents: AuditEvent[] = [
     organizationId: "org_demo",
     workspaceId: "workspace_demo",
     userId: "user_demo",
-    eventType: "integration.installed",
+    eventType: "integration.oauth_completed",
     entityType: "organization_integration",
     entityId: "int_slack",
     payload: {
       providerKey: "slack",
     },
-    createdAt: "2026-03-23T08:55:00.000Z",
+    createdAt: "2026-03-23T09:05:00.000Z",
   },
   {
     id: "audit_3",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    userId: "user_demo",
+    eventType: "agent.tool_grant.updated",
+    entityType: "tool_grant",
+    entityId: "tool_grant_support_slack",
+    payload: {
+      agentId: "agent_support",
+      providerKey: "slack",
+      tools: ["slack.post"],
+    },
+    createdAt: "2026-03-23T09:07:30.000Z",
+  },
+  {
+    id: "audit_4",
     organizationId: "org_demo",
     workspaceId: "workspace_demo",
     userId: "user_demo",

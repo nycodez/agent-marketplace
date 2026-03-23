@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.8.0",
   "scripts": {
+    "dev": "docker compose up --build",
+    "dev:down": "docker compose down",
+    "dev:clean": "docker compose down -v",
+    "dev:logs": "docker compose logs -f web api worker temporal temporal-ui postgres redis",
     "dev:web": "pnpm --filter @agent-marketplace/web dev",
     "dev:api": "pnpm --filter @agent-marketplace/api dev",
     "dev:worker": "pnpm --filter @agent-marketplace/worker dev",
@@ -14,4 +18,3 @@
     "typescript": "^5.8.2"
   }
 }
-

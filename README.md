@@ -4,6 +4,8 @@ Standalone agent operating system for defining agent teams, installing integrati
 
 Temporal is the orchestration boundary for agent runs and publication flows.
 
+Slack is a first-class communication integration: install it once at the organization level, grant scoped Slack tools to specific agents, and the run planner will only schedule Slack actions when both the install and the grant are present.
+
 ## Workspace
 
 - `apps/web`: Next.js product UI
@@ -30,6 +32,38 @@ The initial scaffold includes typed contracts, API endpoints, worker queue scaff
 - Program-file publication to Base and Arweave is also scheduled through Temporal.
 - The API stores workflow metadata on run and publication records so Temporal state is visible in the product.
 
+## Local Startup
+
+One command starts the full local stack:
+
+```bash
+pnpm dev
+```
+
+That brings up:
+
+- `web` on `http://localhost:3000`
+- `api` on `http://localhost:4001`
+- `Temporal UI` on `http://localhost:8080`
+- `postgres` on `localhost:5432`
+- `redis` on `localhost:6379`
+
+Useful commands:
+
+```bash
+pnpm dev:logs
+pnpm dev:down
+pnpm dev:clean
+```
+
+The direct host processes still exist for non-container workflows:
+
+```bash
+pnpm dev:web
+pnpm dev:api
+pnpm dev:worker
+```
+
 ## Theme
 
 The product uses a strict monochrome theme:
@@ -39,4 +73,4 @@ The product uses a strict monochrome theme:
 
 ## Status
 
-This initial implementation provides the repo structure, core contracts, a bootstrap API with in-memory persistence, a worker scaffold, and a Next.js app shell wired to the same domain model. PostgreSQL and Redis remain the intended production infrastructure and are represented in the shared config and worker queue code.
+This initial implementation provides the repo structure, core contracts, a bootstrap API with in-memory persistence, Temporal worker scaffolding, containerized local startup, and a Next.js app shell wired to the same domain model. PostgreSQL and Redis remain the intended production infrastructure and are represented in the shared config and compose stack.

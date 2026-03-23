@@ -1,5 +1,13 @@
 import { SectionCard, StatTile, StatusPill } from "@agent-marketplace/ui";
-import { approvals, auditEvents, draftPreview, overviewStats, publicationRecords } from "../../../lib/demo-data";
+import {
+  approvals,
+  auditEvents,
+  draftPreview,
+  getToolGrantsForAgent,
+  integrations,
+  overviewStats,
+  publicationRecords,
+} from "../../../lib/demo-data";
 
 export default function DashboardPage() {
   return (
@@ -32,6 +40,13 @@ export default function DashboardPage() {
                 <p className="agent-list__meta">{agent.allowedTools.join(", ")}</p>
               </div>
             ))}
+            <p className="muted-copy">
+              Slack is connected as{" "}
+              {integrations.find((integration) => integration.providerKey === "slack")?.displayName ??
+                "the workspace Slack install"}
+              {" "}and granted to{" "}
+              {getToolGrantsForAgent("agent_support").length ? "the Customer Support Agent" : "no agents yet"}.
+            </p>
           </div>
         </SectionCard>
         <SectionCard title="Approval queue" eyebrow="Operators">
