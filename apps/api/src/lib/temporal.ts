@@ -1,6 +1,6 @@
 import { Connection, Client } from "@temporalio/client";
 import { appConfig } from "@agent-marketplace/config";
-import type { OrchestrationRef } from "@agent-marketplace/contracts";
+import type { OrchestrationRef, RunPlan } from "@agent-marketplace/contracts";
 
 let clientPromise: Promise<Client> | null = null;
 
@@ -52,6 +52,7 @@ export const startTemporalRunWorkflow = async ({
   agentId,
   approvalRequired,
   plannedActions,
+  plan,
 }: {
   runId: string;
   workspaceId: string;
@@ -59,6 +60,7 @@ export const startTemporalRunWorkflow = async ({
   agentId: string;
   approvalRequired: boolean;
   plannedActions: string[];
+  plan: RunPlan;
 }): Promise<OrchestrationRef> => {
   const workflowType = "agentRunWorkflow";
   const taskQueue = appConfig.temporalRunTaskQueue;
@@ -83,6 +85,7 @@ export const startTemporalRunWorkflow = async ({
           agentId,
           approvalRequired,
           plannedActions,
+          plan,
         },
       ],
     });

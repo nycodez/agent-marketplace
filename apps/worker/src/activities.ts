@@ -1,4 +1,5 @@
 import { Context } from "@temporalio/activity";
+import type { RunPlan } from "@agent-marketplace/contracts";
 
 export type AgentRunWorkflowInput = {
   runId: string;
@@ -7,6 +8,7 @@ export type AgentRunWorkflowInput = {
   agentId: string;
   approvalRequired: boolean;
   plannedActions: string[];
+  plan: RunPlan;
 };
 
 export type ProgramPublicationWorkflowInput = {
@@ -23,7 +25,12 @@ export async function executeAgentRun(input: AgentRunWorkflowInput) {
   return {
     workflowId: info.workflowExecution.workflowId,
     runId: info.workflowExecution.runId,
-    note: `Temporal activity executed ${input.plannedActions.length} planned actions for agent ${input.agentId}.`,
+    note: `Temporal activity executed ${input.plan.steps.length} structured steps for agent ${input.agentId}.`,
+    planner: {
+      mode: input.plan.plannerMode,
+      providerKey: input.plan.modelProviderKey,
+      modelName: input.plan.modelName,
+    },
   };
 }
 

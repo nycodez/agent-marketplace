@@ -3,15 +3,23 @@ import type {
   AgentSpec,
   AgentTeamDraft,
   ApprovalRequirement,
+  DraftGenerationResult,
   OrganizationIntegration,
   ProgramFile,
   PublicationRecord,
   Run,
+  RunPlan,
+  RunPlanStep,
   RunStep,
   ToolGrant,
   TriggerType,
 } from "@agent-marketplace/contracts";
 import { writeScopedTools } from "@agent-marketplace/integrations";
+import {
+  generateDraftsWithModel,
+  generateRunPlanWithModel,
+  testPlannerModelIntegration,
+} from "./llm";
 
 const slugify = (value: string) =>
   value
@@ -19,9 +27,11 @@ const slugify = (value: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+const nowIso = () => new Date().toISOString();
+
 const inferRoleSeeds = (brief: string) => {
   const normalized = brief.toLowerCase();
-  const seeds = [];
+  const seeds: string[] = [];
 
   if (normalized.includes("sales") || normalized.includes("pipeline")) {
     seeds.push("Pipeline Operator");
@@ -61,9 +71,7 @@ const roleToTools = (role: string): string[] => {
   return ["gmail.read", "slack.post", "http.get"];
 };
 
-const nowIso = () => new Date().toISOString();
-
-export const generateAgentDraftsFromBrief = (brief: string): Pick<AgentTeamDraft, "generatedAgents" | "clarifications"> => {
+const fallbackDraftGeneration = (brief: string): DraftGenerationResult => {
   const roleSeeds = inferRoleSeeds(brief);
   const generatedAgents: AgentDraft[] = roleSeeds.map((role, index) => {
     const tools = roleToTools(role);
@@ -81,11 +89,7 @@ export const generateAgentDraftsFromBrief = (brief: string): Pick<AgentTeamDraft
         "Prepare external actions in a reviewable, least-privilege format.",
       ],
       allowedTools: tools,
-      knowledgeSources: [
-        "workspace brief",
-        "connected integrations",
-        "approved run history",
-      ],
+      knowledgeSources: ["workspace brief", "connected integrations", "approved run history"],
       triggerModes: ["manual", "integration_event"],
       approvalPolicy,
       successMetrics: [
@@ -100,14 +104,155 @@ export const generateAgentDraftsFromBrief = (brief: string): Pick<AgentTeamDraft
     };
   });
 
-  const clarifications =
-    brief.trim().length < 80
-      ? [
-          "The brief is thin. Add target systems, example tasks, and the decisions these agents should make autonomously.",
-        ]
-      : [];
+  return {
+    generatedAgents,
+    clarifications:
+      brief.trim().length < 80
+        ? [
+            "The brief is thin. Add target systems, example tasks, and the decisions these agents should make autonomously.",
+          ]
+        : [],
+    plannerMode: "fallback",
+    modelProviderKey: null,
+    modelName: null,
+  };
+};
 
-  return { generatedAgents, clarifications };
+const normalizeDraftGeneration = (result: DraftGenerationResult): DraftGenerationResult => ({
+  ...result,
+  generatedAgents: result.generatedAgents.map((agent, index) => {
+    const dedupedTools = Array.from(new Set(agent.allowedTools));
+    const approvalPolicy: ApprovalRequirement = dedupedTools.some((tool) => writeScopedTools.has(tool))
+      ? "required"
+      : agent.approvalPolicy;
+
+    return {
+      ...agent,
+      id: agent.id?.trim() ? agent.id : `draft-agent-${index + 1}-${slugify(agent.roleName)}`,
+      allowedTools: dedupedTools,
+      approvalPolicy,
+      knowledgeSources: agent.knowledgeSources.length ? agent.knowledgeSources : ["workspace brief"],
+      triggerModes: agent.triggerModes.length ? agent.triggerModes : ["manual", "integration_event"],
+      successMetrics: agent.successMetrics.length ? agent.successMetrics : ["Time to first useful action"],
+      constraints: agent.constraints.length
+        ? agent.constraints
+        : ["Operate only on explicitly granted integrations and tools."],
+    };
+  }),
+});
+
+const fallbackRunPlan = ({
+  agent,
+  prompt,
+  executableTools,
+  missingGrantTools,
+}: {
+  agent: AgentSpec;
+  prompt?: string;
+  executableTools: string[];
+  missingGrantTools: string[];
+}): RunPlan => {
+  const stepChain: RunPlanStep[] = executableTools.length
+    ? executableTools.map((tool, index) => ({
+        id: `step-${index + 1}`,
+        title: index === 0 ? "Review context" : `Use ${tool}`,
+        objective:
+          index === 0
+            ? "Review the current task context and collect the facts needed for execution."
+            : `Use ${tool} to advance the current assignment.`,
+        tool: index === 0 && !tool.includes(".read") ? null : tool,
+        dependsOn: index === 0 ? [] : [`step-${index}`],
+        requiresApproval: writeScopedTools.has(tool),
+        kind: index === 0 ? "reason" : "tool_call",
+      }))
+    : [
+        {
+          id: "step-1",
+          title: "Pause for setup",
+          objective: "No granted tools are available yet, so stay in planning mode until integrations are connected.",
+          tool: null,
+          dependsOn: [],
+          requiresApproval: false,
+          kind: "reason" as const,
+        },
+      ];
+
+  const requestedActions = stepChain
+    .filter((step) => step.tool && writeScopedTools.has(step.tool))
+    .map((step) => `Execute ${step.tool}`);
+
+  return {
+    summary: `${agent.displayName} is preparing a run plan for the current task.`,
+    plannedActions: [
+      `Review ${agent.displayName.toLowerCase()} mission and current task brief`,
+      prompt ? `Use prompt context: ${prompt}` : "Use workspace brief and latest configuration",
+      `Operate with granted tools: ${executableTools.join(", ") || "none yet"}`,
+      missingGrantTools.length
+        ? `Do not use ungranted tools: ${missingGrantTools.join(", ")}`
+        : "All configured tools are granted for execution",
+    ],
+    requestedActions,
+    executableTools,
+    missingGrantTools,
+    plannerMode: "fallback",
+    modelProviderKey: null,
+    modelName: null,
+    clarifications: executableTools.length ? [] : ["Connect and grant at least one operational tool before running."],
+    steps: stepChain,
+  };
+};
+
+const normalizeRunPlan = ({
+  plan,
+  executableTools,
+  missingGrantTools,
+}: {
+  plan: RunPlan;
+  executableTools: string[];
+  missingGrantTools: string[];
+}): RunPlan => {
+  const allowedToolSet = new Set(executableTools);
+
+  const normalizedSteps = plan.steps.map((step, index) => {
+    const tool = step.tool && allowedToolSet.has(step.tool) ? step.tool : null;
+    return {
+      ...step,
+      id: step.id?.trim() ? step.id : `step-${index + 1}`,
+      tool,
+      requiresApproval: tool ? writeScopedTools.has(tool) : step.requiresApproval,
+      dependsOn: step.dependsOn.filter(Boolean),
+    };
+  });
+
+  const requestedActions = normalizedSteps
+    .filter((step) => step.tool && writeScopedTools.has(step.tool))
+    .map((step) => `Execute ${step.tool}`);
+
+  return {
+    ...plan,
+    executableTools,
+    missingGrantTools,
+    plannedActions: plan.plannedActions.length
+      ? plan.plannedActions
+      : normalizedSteps.map((step) => `${step.title}: ${step.objective}`),
+    requestedActions,
+    steps: normalizedSteps,
+  };
+};
+
+export const generateAgentDraftsFromBrief = async ({
+  brief,
+  integrations = [],
+}: {
+  brief: string;
+  integrations?: OrganizationIntegration[];
+}): Promise<DraftGenerationResult> => {
+  const llmResult = await generateDraftsWithModel({
+    brief,
+    integrations,
+  });
+
+  return normalizeDraftGeneration(llmResult ?? fallbackDraftGeneration(brief));
 };
 
 export const publishAgentsFromDraft = (draft: AgentTeamDraft) => {
@@ -131,7 +276,7 @@ export const publishAgentsFromDraft = (draft: AgentTeamDraft) => {
   });
 };
 
-export const planRun = ({
+export const planRun = async ({
   agent,
   prompt,
   integrations,
@@ -143,73 +288,78 @@ export const planRun = ({
   integrations: OrganizationIntegration[];
   toolGrants: ToolGrant[];
   userId: string;
-}): {
+}): Promise<{
   run: Omit<Run, "id" | "approvalRequestId" | "orchestration" | "createdAt" | "updatedAt">;
   steps: Array<Omit<RunStep, "id" | "createdAt" | "updatedAt">>;
   requestedActions: string[];
-} => {
+  plan: RunPlan;
+}> => {
   const grantedTools = new Set(toolGrants.flatMap((grant) => grant.tools));
   const executableTools = agent.allowedTools.filter((tool) => grantedTools.has(tool));
   const missingGrantTools = agent.allowedTools.filter((tool) => !grantedTools.has(tool));
-  const availableProviders = integrations.map((integration) => integration.providerKey).join(", ");
-  const plannedActions = [
-    `Review ${agent.displayName.toLowerCase()} mission and current task brief`,
-    prompt ? `Use prompt context: ${prompt}` : "Use workspace brief and latest configuration",
-    `Operate with granted tools: ${executableTools.join(", ") || "none yet"}`,
-    availableProviders
-      ? `Cross-check available integrations: ${availableProviders}`
-      : "No connected integrations yet; stay in planning mode",
-    missingGrantTools.length
-      ? `Do not use ungranted tools: ${missingGrantTools.join(", ")}`
-      : "All configured tools are granted for execution",
-  ];
 
-  const requestedActions = executableTools
-    .filter((tool) => writeScopedTools.has(tool))
-    .map((tool) => `Execute tool ${tool} after approval`);
+  const llmPlan = await generateRunPlanWithModel({
+    mission: agent.mission,
+    prompt,
+    executableTools,
+    missingGrantTools,
+    integrations,
+  });
+
+  const plan = normalizeRunPlan({
+    plan:
+      llmPlan ??
+      fallbackRunPlan({
+        agent,
+        prompt,
+        executableTools,
+        missingGrantTools,
+      }),
+    executableTools,
+    missingGrantTools,
+  });
 
   const run: Omit<Run, "id" | "approvalRequestId" | "orchestration" | "createdAt" | "updatedAt"> = {
     organizationId: agent.organizationId,
     workspaceId: agent.workspaceId,
     agentId: agent.id,
     triggerType: "manual" satisfies TriggerType,
-    status: requestedActions.length ? "awaiting_approval" : "running",
-    summary: `${agent.displayName} is preparing a run plan for the current task.`,
-    plannedActions,
-    approvalRequirement: requestedActions.length ? "required" : "not_required",
+    status: plan.requestedActions.length ? "awaiting_approval" : "running",
+    summary: plan.summary,
+    plannedActions: plan.plannedActions,
+    approvalRequirement: plan.requestedActions.length ? "required" : "not_required",
     createdByUserId: userId,
   };
 
-  const steps: Array<Omit<RunStep, "id" | "createdAt" | "updatedAt">> = [
-    {
-      runId: "",
-      title: "Plan run",
-      status: "completed",
-      output: `Planned ${plannedActions.length} actions.`,
-      metadata: {
-        plannedActions,
-        executableTools,
-        missingGrantTools,
-        generatedAt: nowIso(),
-      },
+  const planningStep: Omit<RunStep, "id" | "createdAt" | "updatedAt"> = {
+    runId: "",
+    title: "Plan run",
+    status: "completed",
+    output: `Prepared ${plan.steps.length} execution steps using ${plan.plannerMode === "llm" ? `${plan.modelProviderKey}:${plan.modelName}` : "fallback planning"}.`,
+    metadata: {
+      plan,
+      generatedAt: nowIso(),
     },
-    {
-      runId: "",
-      title: requestedActions.length ? "Await approval" : "Execute read-only workflow",
-      status: requestedActions.length ? "queued" : "running",
-      output: requestedActions.length ? null : "Execution can continue without approval.",
-      metadata: {
-        requestedActions,
-        executableTools,
-        missingGrantTools,
-      },
+  };
+
+  const executionSteps: Array<Omit<RunStep, "id" | "createdAt" | "updatedAt">> = plan.steps.map((step, index) => ({
+    runId: "",
+    title: step.title,
+    status: plan.requestedActions.length ? "queued" : index === 0 ? "running" : "queued",
+    output: null,
+    metadata: {
+      planStep: step,
+      plannerMode: plan.plannerMode,
+      modelProviderKey: plan.modelProviderKey,
+      modelName: plan.modelName,
     },
-  ];
+  }));
 
   return {
     run,
-    steps,
-    requestedActions,
+    steps: [planningStep, ...executionSteps],
+    requestedActions: plan.requestedActions,
+    plan,
   };
 };
 
@@ -265,3 +415,5 @@ export const planPublication = ({
     createdByUserId: userId,
   };
 };
+
+export { testPlannerModelIntegration } from "./llm";

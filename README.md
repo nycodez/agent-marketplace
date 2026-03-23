@@ -13,6 +13,7 @@ Slack is a first-class communication integration: install it once at the organiz
 - `apps/worker`: Temporal worker runtime
 - `packages/contracts`: shared typed contracts and zod schemas
 - `packages/config`: environment helpers
+- `packages/database`: PostgreSQL migration runner and baseline SQL schema
 - `packages/integrations`: provider catalog and connector metadata
 - `packages/agent-runtime`: deterministic provisioning and run-planning helpers
 - `packages/ui`: shared React primitives and theme helpers
@@ -54,6 +55,8 @@ Useful commands:
 pnpm dev:logs
 pnpm dev:down
 pnpm dev:clean
+pnpm db:migrate
+pnpm db:migrate:status
 ```
 
 The direct host processes still exist for non-container workflows:
@@ -74,3 +77,25 @@ The product uses a strict monochrome theme:
 ## Status
 
 This initial implementation provides the repo structure, core contracts, a bootstrap API with in-memory persistence, Temporal worker scaffolding, containerized local startup, and a Next.js app shell wired to the same domain model. PostgreSQL and Redis remain the intended production infrastructure and are represented in the shared config and compose stack.
+
+## Migrations
+
+The PostgreSQL migration system now lives in [packages/database](/Users/agonzales/Containers/roamstay/agent-marketplace/packages/database). It keeps ordered SQL migrations in [migrations](/Users/agonzales/Containers/roamstay/agent-marketplace/packages/database/migrations) and records applied files in a `schema_migrations` table.
+
+Run the baseline schema:
+
+```bash
+pnpm db:migrate
+```
+
+Check applied vs pending migrations:
+
+```bash
+pnpm db:migrate:status
+```
+
+Create the next migration file:
+
+```bash
+pnpm db:migrate:create "add persistent sessions"
+```

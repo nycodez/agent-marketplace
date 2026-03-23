@@ -25,6 +25,7 @@ import {
   planPublication,
   planRun,
   publishAgentsFromDraft,
+  testPlannerModelIntegration,
 } from "@agent-marketplace/agent-runtime";
 import { appConfig } from "@agent-marketplace/config";
 import { findIntegrationProvider, integrationProviders } from "@agent-marketplace/integrations";
@@ -41,6 +42,7 @@ import {
   createMembership,
   getStore,
   nowIso,
+  persistStore,
   recordAuditEvent,
 } from "../services/store.js";
 
@@ -64,6 +66,37 @@ const slugify = (value: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+
+const modelProviderKeys = new Set(["openai", "anthropic", "grok"]);
+
+const maskSecretValue = (value: string) => {
+  const lastFour = value.slice(-4);
+  return lastFour ? `••••${lastFour}` : "••••";
+};
+
+const withStoredIntegrationMetadata = (metadata: Record<string, unknown>) => {
+  const next = { ...metadata };
+  const apiKey = typeof next.apiKey === "string" ? next.apiKey.trim() : "";
+  if (apiKey && typeof next.apiKeyLastFour !== "string") {
+    next.apiKeyLastFour = apiKey.slice(-4);
+  }
+  return next;
+};
+
+const sanitizeIntegrationMetadata = (metadata: Record<string, unknown>) =>
+  Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => {
+      if (typeof value === "string" && /(api[_-]?key|token|secret)/i.test(key)) {
+        return [key, maskSecretValue(value)];
+      }
+      return [key, value];
+    }),
+  );
+
+const sanitizeIntegration = (integration: OrganizationIntegration) => ({
+  ...integration,
+  metadata: sanitizeIntegrationMetadata(integration.metadata),
+});
 
 const buildAgentVersion = ({
   agentId,
@@ -150,6 +183,20 @@ const createProgramFilePublication = ({
 };
 
 export const registerRoutes = async (app: FastifyInstance) => {
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (
+      request.method === "GET" ||
+      request.method === "HEAD" ||
+      request.method === "OPTIONS" ||
+      reply.statusCode >= 400
+    ) {
+      return payload;
+    }
+
+    await persistStore();
+    return payload;
+  });
+
   app.get("/health", async () => ok({ status: "ok", service: "agent-marketplace-api" }));
 
   app.post("/auth/register", async (request, reply) => {
@@ -669,7 +716,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       (candidate) => candidate.organizationId === authContext.organization.id,
     );
 
-    return reply.send(ok(installations));
+    return reply.send(ok(installations.map(sanitizeIntegration)));
   });
 
   app.post("/organization-integrations/:provider/install", async (request, reply) => {
@@ -696,7 +743,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       status: provider.authType === "webhook" ? "connected" : "pending",
       authType: provider.authType,
       scopes: parsed.data.scopes.length ? parsed.data.scopes : provider.tools,
-      metadata: parsed.data.metadata,
+      metadata: withStoredIntegrationMetadata(parsed.data.metadata),
       createdByUserId: authContext.user.id,
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -718,12 +765,14 @@ export const registerRoutes = async (app: FastifyInstance) => {
     });
 
     return reply.code(201).send(
-      ok(installation, {
+      ok(sanitizeIntegration(installation), {
         nextAction:
           provider.setupMode === "oauth"
             ? "Complete the OAuth callback to finish setup."
             : provider.setupMode === "api_key"
-              ? "Store and verify the API key out of band."
+              ? modelProviderKeys.has(provider.key)
+                ? "Store the provider API key in metadata.apiKey, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
+                : "Store and verify the API key out of band."
               : provider.setupMode === "wallet"
                 ? "Connect a publishing wallet or signer, then verify the install."
                 : "Send events to the webhook endpoint to activate runs.",
@@ -763,7 +812,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       },
     });
 
-    return reply.send(ok(integration));
+    return reply.send(ok(sanitizeIntegration(integration)));
   });
 
   app.post("/organization-integrations/:id/test", async (request, reply) => {
@@ -781,13 +830,32 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
     }
 
+    if (modelProviderKeys.has(integration.providerKey)) {
+      const probe = await testPlannerModelIntegration(integration);
+      integration.status = probe.healthy ? "connected" : "failed";
+      integration.lastValidatedAt = probe.healthy ? nowIso() : integration.lastValidatedAt;
+      integration.updatedAt = nowIso();
+
+      return reply.send(
+        ok({
+          integration: sanitizeIntegration(integration),
+          healthy: probe.healthy,
+          planner: {
+            providerKey: probe.modelProviderKey,
+            modelName: probe.modelName,
+            error: probe.error,
+          },
+        }),
+      );
+    }
+
     integration.status = "connected";
     integration.lastValidatedAt = nowIso();
     integration.updatedAt = nowIso();
 
     return reply.send(
       ok({
-        integration,
+        integration: sanitizeIntegration(integration),
         healthy: true,
       }),
     );
@@ -810,13 +878,17 @@ export const registerRoutes = async (app: FastifyInstance) => {
 
     const grants = getStore().toolGrants
       .filter((grant) => grant.agentId === agent.id && grant.workspaceId === authContext.workspace.id)
-      .map((grant) => ({
-        ...grant,
-        integration:
+      .map((grant) => {
+        const integration =
           getStore().organizationIntegrations.find(
-            (integration) => integration.id === grant.organizationIntegrationId,
-          ) ?? null,
-      }));
+            (candidate) => candidate.id === grant.organizationIntegrationId,
+          ) ?? null;
+
+        return {
+          ...grant,
+          integration: integration ? sanitizeIntegration(integration) : null,
+        };
+      });
 
     return reply.send(ok(grants));
   });
@@ -1291,7 +1363,16 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(404).send(fail("id", "Draft not found.", "exists"));
     }
 
-    const generated = generateAgentDraftsFromBrief(draft.brief);
+    const connectedIntegrations = getStore().organizationIntegrations.filter(
+      (candidate) =>
+        candidate.organizationId === authContext.organization.id &&
+        candidate.status === "connected",
+    );
+
+    const generated = await generateAgentDraftsFromBrief({
+      brief: draft.brief,
+      integrations: connectedIntegrations,
+    });
     draft.generatedAgents = generated.generatedAgents;
     draft.clarifications = generated.clarifications;
     draft.status = "generated";
@@ -1310,7 +1391,15 @@ export const registerRoutes = async (app: FastifyInstance) => {
       },
     });
 
-    return reply.send(ok(draft));
+    return reply.send(
+      ok(draft, {
+        planner: {
+          mode: generated.plannerMode,
+          providerKey: generated.modelProviderKey,
+          modelName: generated.modelName,
+        },
+      }),
+    );
   });
 
   app.post("/agent-team-drafts/:id/publish", async (request, reply) => {
@@ -1582,7 +1671,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
     const toolGrants = getStore().toolGrants.filter(
       (grant) => grant.agentId === agent.id && grant.workspaceId === authContext.workspace.id,
     );
-    const planned = planRun({
+    const planned = await planRun({
       agent,
       prompt: parsed.data.prompt,
       integrations,
@@ -1638,6 +1727,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       agentId: run.agentId,
       approvalRequired: run.approvalRequirement === "required",
       plannedActions: run.plannedActions,
+      plan: planned.plan,
     });
     run.updatedAt = nowIso();
     if (run.orchestration.status === "started" && run.status !== "awaiting_approval") {
@@ -1654,6 +1744,11 @@ export const registerRoutes = async (app: FastifyInstance) => {
       payload: {
         agentId: agent.id,
         status: run.status,
+        planner: {
+          mode: planned.plan.plannerMode,
+          providerKey: planned.plan.modelProviderKey,
+          modelName: planned.plan.modelName,
+        },
         orchestration: run.orchestration,
       },
     });
@@ -1663,6 +1758,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
         run,
         steps,
         approvalRequest,
+        plan: planned.plan,
       }),
     );
   });

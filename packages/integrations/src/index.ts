@@ -1,107 +1,78 @@
 import type { IntegrationProvider } from "@agent-marketplace/contracts";
 
+import type { IntegrationProviderDefinition, IntegrationToolDefinition } from "./definitions";
+import {
+  anthropicDefinition,
+  anthropicProvider,
+  arweaveDefinition,
+  arweaveProvider,
+  baseDefinition,
+  baseProvider,
+  genericApiDefinition,
+  genericApiProvider,
+  grokDefinition,
+  grokProvider,
+  googleWorkspaceDefinition,
+  googleWorkspaceProvider,
+  hubSpotDefinition,
+  hubSpotProvider,
+  microsoft365Definition,
+  microsoft365Provider,
+  openAiDefinition,
+  openAiProvider,
+  salesforceDefinition,
+  salesforceProvider,
+  slackDefinition,
+  slackProvider,
+  webhookDefinition,
+  webhookProvider,
+} from "./providers";
+
+const providerDefinitions: IntegrationProviderDefinition[] = [
+  openAiDefinition,
+  anthropicDefinition,
+  grokDefinition,
+  googleWorkspaceDefinition,
+  microsoft365Definition,
+  slackDefinition,
+  hubSpotDefinition,
+  salesforceDefinition,
+  genericApiDefinition,
+  webhookDefinition,
+  baseDefinition,
+  arweaveDefinition,
+];
+
 export const integrationProviders: IntegrationProvider[] = [
-  {
-    key: "google-workspace",
-    name: "Google Workspace",
-    description: "Mail, calendar, and docs access for operational agents.",
-    category: "productivity",
-    authType: "oauth",
-    tools: ["gmail.read", "gmail.send", "calendar.read", "calendar.write", "drive.search"],
-    setupMode: "oauth",
-  },
-  {
-    key: "microsoft-365",
-    name: "Microsoft 365",
-    description: "Outlook, calendar, and file access for enterprise workflows.",
-    category: "productivity",
-    authType: "oauth",
-    tools: ["outlook.read", "outlook.send", "calendar.read", "calendar.write", "onedrive.search"],
-    setupMode: "oauth",
-  },
-  {
-    key: "slack",
-    name: "Slack",
-    description: "Read channels, post updates, and create escalation threads.",
-    category: "communication",
-    authType: "oauth",
-    tools: ["slack.read", "slack.post", "slack.thread"],
-    setupMode: "oauth",
-  },
-  {
-    key: "hubspot",
-    name: "HubSpot",
-    description: "CRM objects, tasking, and pipeline actions.",
-    category: "crm",
-    authType: "oauth",
-    tools: ["crm.contacts.read", "crm.contacts.write", "crm.tasks.write", "crm.companies.write"],
-    setupMode: "oauth",
-  },
-  {
-    key: "salesforce",
-    name: "Salesforce",
-    description: "Enterprise CRM actions and object updates.",
-    category: "crm",
-    authType: "oauth",
-    tools: ["sf.records.read", "sf.records.write", "sf.tasks.write"],
-    setupMode: "oauth",
-  },
-  {
-    key: "generic-api",
-    name: "Generic API",
-    description: "Bring your own REST endpoint with scoped API keys.",
-    category: "custom",
-    authType: "api_key",
-    tools: ["http.get", "http.post", "http.patch"],
-    setupMode: "api_key",
-  },
-  {
-    key: "webhook",
-    name: "Webhook",
-    description: "Receive inbound events from external systems.",
-    category: "custom",
-    authType: "webhook",
-    tools: ["webhook.receive"],
-    setupMode: "webhook",
-  },
-  {
-    key: "base",
-    name: "Base",
-    description: "Publish agent program files and manifests to Base-backed contracts and registries.",
-    category: "publishing",
-    authType: "wallet",
-    tools: ["base.publish_program", "base.register_manifest"],
-    setupMode: "wallet",
-  },
-  {
-    key: "arweave",
-    name: "Arweave",
-    description: "Publish immutable program files, manifests, and bundles to Arweave.",
-    category: "publishing",
-    authType: "wallet",
-    tools: ["arweave.upload_program", "arweave.pin_manifest"],
-    setupMode: "wallet",
-  },
+  openAiProvider,
+  anthropicProvider,
+  grokProvider,
+  googleWorkspaceProvider,
+  microsoft365Provider,
+  slackProvider,
+  hubSpotProvider,
+  salesforceProvider,
+  genericApiProvider,
+  webhookProvider,
+  baseProvider,
+  arweaveProvider,
 ];
 
 export const findIntegrationProvider = (key: string) =>
   integrationProviders.find((provider) => provider.key === key) ?? null;
 
-export const writeScopedTools = new Set([
-  "gmail.send",
-  "calendar.write",
-  "outlook.send",
-  "slack.post",
-  "slack.thread",
-  "crm.contacts.write",
-  "crm.tasks.write",
-  "crm.companies.write",
-  "sf.records.write",
-  "sf.tasks.write",
-  "http.post",
-  "http.patch",
-  "base.publish_program",
-  "base.register_manifest",
-  "arweave.upload_program",
-  "arweave.pin_manifest",
-]);
+export const integrationToolDefinitions = new Map<string, IntegrationToolDefinition[]>(
+  providerDefinitions.map((provider) => [provider.key, provider.toolDefinitions]),
+);
+
+export const findIntegrationToolDefinitions = (providerKey: string) =>
+  integrationToolDefinitions.get(providerKey) ?? [];
+
+export const writeScopedTools = new Set(
+  providerDefinitions.flatMap((provider) =>
+    provider.toolDefinitions.filter((tool) => tool.writeScoped).map((tool) => tool.key),
+  ),
+);
+
+export type { IntegrationProviderDefinition, IntegrationToolDefinition } from "./definitions";
+export * from "./providers";

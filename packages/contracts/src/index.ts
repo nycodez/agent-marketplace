@@ -43,6 +43,8 @@ export const publicationStatusSchema = z.enum([
   "published",
   "failed",
 ]);
+export const plannerModeSchema = z.enum(["llm", "fallback"]);
+export const modelProviderKeySchema = z.enum(["openai", "anthropic", "grok"]);
 export const orchestrationEngineSchema = z.enum(["temporal"]);
 export const orchestrationStatusSchema = z.enum([
   "scheduled",
@@ -184,6 +186,37 @@ export const toolGrantSchema = z.object({
   tools: z.array(z.string()),
   createdByUserId: z.string(),
   createdAt: z.string(),
+});
+
+export const runPlanStepSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  objective: z.string(),
+  tool: z.string().nullable(),
+  dependsOn: z.array(z.string()),
+  requiresApproval: z.boolean(),
+  kind: z.enum(["reason", "tool_call", "approval", "output"]),
+});
+
+export const runPlanSchema = z.object({
+  summary: z.string(),
+  plannedActions: z.array(z.string()),
+  requestedActions: z.array(z.string()),
+  executableTools: z.array(z.string()),
+  missingGrantTools: z.array(z.string()),
+  plannerMode: plannerModeSchema,
+  modelProviderKey: modelProviderKeySchema.nullable(),
+  modelName: z.string().nullable(),
+  clarifications: z.array(z.string()),
+  steps: z.array(runPlanStepSchema),
+});
+
+export const draftGenerationResultSchema = z.object({
+  generatedAgents: z.array(agentDraftSchema),
+  clarifications: z.array(z.string()),
+  plannerMode: plannerModeSchema,
+  modelProviderKey: modelProviderKeySchema.nullable(),
+  modelName: z.string().nullable(),
 });
 
 export const orchestrationRefSchema = z.object({
@@ -362,6 +395,8 @@ export type IntegrationAuthType = z.infer<typeof integrationAuthTypeSchema>;
 export type SetupMode = z.infer<typeof setupModeSchema>;
 export type PublicationTarget = z.infer<typeof publicationTargetSchema>;
 export type PublicationStatus = z.infer<typeof publicationStatusSchema>;
+export type PlannerMode = z.infer<typeof plannerModeSchema>;
+export type ModelProviderKey = z.infer<typeof modelProviderKeySchema>;
 export type OrchestrationEngine = z.infer<typeof orchestrationEngineSchema>;
 export type OrchestrationStatus = z.infer<typeof orchestrationStatusSchema>;
 export type ProgramFileSourceType = z.infer<typeof programFileSourceTypeSchema>;
@@ -376,6 +411,9 @@ export type Membership = z.infer<typeof membershipSchema>;
 export type IntegrationProvider = z.infer<typeof integrationProviderSchema>;
 export type OrganizationIntegration = z.infer<typeof organizationIntegrationSchema>;
 export type ToolGrant = z.infer<typeof toolGrantSchema>;
+export type RunPlanStep = z.infer<typeof runPlanStepSchema>;
+export type RunPlan = z.infer<typeof runPlanSchema>;
+export type DraftGenerationResult = z.infer<typeof draftGenerationResultSchema>;
 export type OrchestrationRef = z.infer<typeof orchestrationRefSchema>;
 export type ProgramFile = z.infer<typeof programFileSchema>;
 export type PublicationRecord = z.infer<typeof publicationRecordSchema>;

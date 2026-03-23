@@ -616,6 +616,14 @@ html[data-theme="dark"] .mono-button--success {
   resize: vertical;
 }
 
+.form-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--accent-secondary);
+}
+
 ::selection {
   background: var(--accent-primary);
   color: var(--accent-foreground);

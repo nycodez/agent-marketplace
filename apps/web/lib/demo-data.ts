@@ -13,7 +13,7 @@ import type {
 export const overviewStats = [
   { label: "Live agents", value: 2, hint: "2 published" },
   { label: "Pending approvals", value: 1, hint: "External writes waiting" },
-  { label: "Integrations", value: 5, hint: "Org-wide installs" },
+  { label: "Integrations", value: 6, hint: "Org-wide installs" },
   { label: "Runs today", value: 2, hint: "1 completed, 1 pending" },
 ];
 
@@ -299,6 +299,24 @@ export const agents: AgentSpec[] = [
 ];
 
 export const integrations: OrganizationIntegration[] = [
+  {
+    id: "int_openai",
+    organizationId: "org_demo",
+    providerKey: "openai",
+    displayName: "OpenAI planner",
+    status: "connected",
+    authType: "api_key",
+    scopes: ["llm.plan", "llm.draft", "llm.extract", "llm.review"],
+    metadata: {
+      defaultModel: "gpt-4.1-mini",
+      defaultForPlanning: true,
+      apiKeyLastFour: "4a9f",
+    },
+    createdByUserId: "user_demo",
+    createdAt: "2026-03-23T08:58:00.000Z",
+    updatedAt: "2026-03-23T09:04:00.000Z",
+    lastValidatedAt: "2026-03-23T09:04:00.000Z",
+  },
   {
     id: "int_google",
     organizationId: "org_demo",
@@ -621,6 +639,20 @@ export const auditEvents: AuditEvent[] = [
     organizationId: "org_demo",
     workspaceId: "workspace_demo",
     userId: "user_demo",
+    eventType: "integration.tested",
+    entityType: "organization_integration",
+    entityId: "int_openai",
+    payload: {
+      providerKey: "openai",
+      model: "gpt-4.1-mini",
+    },
+    createdAt: "2026-03-23T09:04:00.000Z",
+  },
+  {
+    id: "audit_3",
+    organizationId: "org_demo",
+    workspaceId: "workspace_demo",
+    userId: "user_demo",
     eventType: "integration.oauth_completed",
     entityType: "organization_integration",
     entityId: "int_slack",
@@ -630,7 +662,7 @@ export const auditEvents: AuditEvent[] = [
     createdAt: "2026-03-23T09:05:00.000Z",
   },
   {
-    id: "audit_3",
+    id: "audit_4",
     organizationId: "org_demo",
     workspaceId: "workspace_demo",
     userId: "user_demo",
@@ -645,7 +677,7 @@ export const auditEvents: AuditEvent[] = [
     createdAt: "2026-03-23T09:07:30.000Z",
   },
   {
-    id: "audit_4",
+    id: "audit_5",
     organizationId: "org_demo",
     workspaceId: "workspace_demo",
     userId: "user_demo",

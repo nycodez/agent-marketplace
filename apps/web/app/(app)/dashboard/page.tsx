@@ -15,7 +15,7 @@ export default function DashboardPage() {
       <div className="row-between">
         <div>
           <p className="eyebrow">Workspace dashboard</p>
-          <h1>Agent Marketplace Control Room</h1>
+          <h1>Team Command Center</h1>
         </div>
       </div>
 
