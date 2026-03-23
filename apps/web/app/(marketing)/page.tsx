@@ -1,6 +1,41 @@
 import Link from "next/link";
 import { MonochromeButton, SectionCard, StatTile, StatusPill } from "@agent-marketplace/ui";
-import { draftPreview, integrations, overviewStats } from "../../lib/demo-data";
+import { draftPreview, overviewStats } from "../../lib/demo-data";
+import { ThemeToggle } from "../../components/theme-toggle";
+import { TypedTeamDraftExplainer } from "../../components/typed-team-draft-explainer";
+
+const highlightedIntegrations = [
+  {
+    id: "marketing_google",
+    displayName: "Google Workspace",
+    providerKey: "google-workspace",
+    status: "connected" as const,
+  },
+  {
+    id: "marketing_microsoft",
+    displayName: "Microsoft 365",
+    providerKey: "microsoft-365",
+    status: "connected" as const,
+  },
+  {
+    id: "marketing_slack",
+    displayName: "Slack",
+    providerKey: "slack",
+    status: "connected" as const,
+  },
+  {
+    id: "marketing_hubspot",
+    displayName: "HubSpot",
+    providerKey: "hubspot",
+    status: "connected" as const,
+  },
+  {
+    id: "marketing_salesforce",
+    displayName: "Salesforce",
+    providerKey: "salesforce",
+    status: "connected" as const,
+  },
+];
 
 export default function MarketingPage() {
   return (
@@ -9,16 +44,12 @@ export default function MarketingPage() {
         <div className="hero-panel stack">
           <p className="eyebrow">Standalone agent operating system</p>
           <h1 className="hero-title">Build agent teams outside the CRM frame.</h1>
-          <p className="hero-copy">
-            Agent Marketplace turns a business brief into a typed team draft, connects
-            integrations with least-privilege grants, supports first-class publication to Base
-            and Arweave, and keeps every external write behind an approval queue.
-          </p>
+          <TypedTeamDraftExplainer />
           <div className="row-between">
             <Link href="/login">
-              <MonochromeButton>Enter the product</MonochromeButton>
+              <MonochromeButton>Build agents now</MonochromeButton>
             </Link>
-            <StatusPill>Black on white. White on black.</StatusPill>
+            <ThemeToggle />
           </div>
         </div>
         <div className="mono-panel stack">
@@ -46,21 +77,20 @@ export default function MarketingPage() {
       </section>
 
       <section className="two-up-grid">
-        <SectionCard title="Why this repo exists" eyebrow="Product boundary">
+        <SectionCard title="Why we exist" eyebrow="Product boundary">
           <ul className="bullet-list">
             <li>Separate auth, tenancy, and routing from the CRM.</li>
             <li>Provision agents from briefs, not rigid admin forms.</li>
             <li>Own integrations, grants, runs, approvals, and audit state in one system.</li>
-            <li>Publish agent program files directly to Base and Arweave.</li>
+            <li>Publish agent settings to the blockchain for long term survivability.</li>
           </ul>
         </SectionCard>
-        <SectionCard title="First integrations" eyebrow="Marketplace installs">
+        <SectionCard title="" eyebrow="Marketplace installs">
           <div className="stack">
-            {integrations.map((integration) => (
+            {highlightedIntegrations.map((integration) => (
               <div key={integration.id} className="row-between">
                 <div>
                   <strong>{integration.displayName}</strong>
-                  <p className="muted-copy">{integration.providerKey}</p>
                 </div>
                 <StatusPill>{integration.status}</StatusPill>
               </div>

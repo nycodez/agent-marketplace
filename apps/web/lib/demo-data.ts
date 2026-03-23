@@ -11,10 +11,10 @@ import type {
 } from "@agent-marketplace/contracts";
 
 export const overviewStats = [
-  { label: "Live agents", value: 2, hint: "2 published in this workspace" },
+  { label: "Live agents", value: 2, hint: "2 published" },
   { label: "Pending approvals", value: 1, hint: "External writes waiting" },
-  { label: "Connected integrations", value: 5, hint: "Org-wide installs" },
-  { label: "Runs today", value: 2, hint: "1 completed, 1 awaiting approval" },
+  { label: "Integrations", value: 5, hint: "Org-wide installs" },
+  { label: "Runs today", value: 2, hint: "1 completed, 1 pending" },
 ];
 
 export const draftPreview: AgentTeamDraft = {
@@ -107,7 +107,7 @@ export const integrations: OrganizationIntegration[] = [
     id: "int_google",
     organizationId: "org_demo",
     providerKey: "google-workspace",
-    displayName: "Go-to-market Google Workspace",
+    displayName: "Google Workspace",
     status: "connected",
     authType: "oauth",
     scopes: ["gmail.read", "gmail.send", "calendar.read"],
@@ -121,7 +121,7 @@ export const integrations: OrganizationIntegration[] = [
     id: "int_hubspot",
     organizationId: "org_demo",
     providerKey: "hubspot",
-    displayName: "Primary Revenue HubSpot",
+    displayName: "HubSpot",
     status: "connected",
     authType: "oauth",
     scopes: ["crm.contacts.read", "crm.tasks.write"],

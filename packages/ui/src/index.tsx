@@ -1,4 +1,4 @@
-import type { PropsWithChildren, ReactNode } from "react";
+import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
 
 export function SectionCard({
   title,
@@ -6,7 +6,7 @@ export function SectionCard({
   actions,
   children,
 }: PropsWithChildren<{
-  title: string;
+  title?: string;
   eyebrow?: string;
   actions?: ReactNode;
 }>) {
@@ -15,7 +15,7 @@ export function SectionCard({
       <div className="section-card__header">
         <div>
           {eyebrow ? <p className="section-card__eyebrow">{eyebrow}</p> : null}
-          <h2 className="section-card__title">{title}</h2>
+          {title ? <h2 className="section-card__title">{title}</h2> : null}
         </div>
         {actions ? <div className="section-card__actions">{actions}</div> : null}
       </div>
@@ -45,10 +45,21 @@ export function StatTile({
 export function MonochromeButton({
   children,
   variant = "primary",
+  className,
+  ...props
 }: PropsWithChildren<{
   variant?: "primary" | "secondary";
-}>) {
-  return <button className={`mono-button mono-button--${variant}`}>{children}</button>;
+}> &
+  ButtonHTMLAttributes<HTMLButtonElement>) {
+  const resolvedClassName = ["mono-button", `mono-button--${variant}`, className]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <button className={resolvedClassName} {...props}>
+      {children}
+    </button>
+  );
 }
 
 export function StatusPill({ children }: PropsWithChildren) {
