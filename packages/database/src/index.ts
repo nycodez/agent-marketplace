@@ -6,3 +6,4 @@ export {
   type MigrationFile,
   type MigrationStatus,
 } from "./migrator";
+export * from "./repository";

@@ -12,6 +12,7 @@
     "@agent-marketplace/agent-runtime": "workspace:*",
     "@agent-marketplace/config": "workspace:*",
     "@agent-marketplace/contracts": "workspace:*",
+    "@agent-marketplace/database": "workspace:*",
     "@agent-marketplace/integrations": "workspace:*",
     "@temporalio/client": "^1.11.5",
     "@fastify/cors": "^10.0.2",

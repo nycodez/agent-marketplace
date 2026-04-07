@@ -4,52 +4,69 @@ import type {
   ProgramPublicationWorkflowInput,
 } from "./activities";
 
-const approvalResolvedSignal = defineSignal<[{
-  approved: boolean;
-  resolvedByUserId: string;
-}]>("approvalResolved");
+const approvalResolvedSignal = defineSignal("approvalResolved");
 
-const { executeAgentRun, publishProgramFile } = proxyActivities<{
-  executeAgentRun: typeof import("./activities").executeAgentRun;
-  publishProgramFile: typeof import("./activities").publishProgramFile;
+const {
+  advanceRunExecution,
+} = proxyActivities<{
+  advanceRunExecution: typeof import("./activities").advanceRunExecution;
 }>({
-  startToCloseTimeout: "5 minutes",
+  startToCloseTimeout: "10 minutes",
+});
+
+const {
+  publishProgramFile,
+  handlePublicationFailure,
+} = proxyActivities<{
+  publishProgramFile: typeof import("./activities").publishProgramFile;
+  handlePublicationFailure: typeof import("./activities").handlePublicationFailure;
+}>({
+  startToCloseTimeout: "10 minutes",
+  retry: {
+    maximumAttempts: 1,
+  },
 });
 
 export async function agentRunWorkflow(input: AgentRunWorkflowInput) {
-  let approvalResolved = !input.approvalRequired;
-  let approved = !input.approvalRequired;
-  let resolvedByUserId: string | null = null;
+  let approvalResolved = false;
 
-  setHandler(approvalResolvedSignal, (payload) => {
+  setHandler(approvalResolvedSignal, () => {
     approvalResolved = true;
-    approved = payload.approved;
-    resolvedByUserId = payload.resolvedByUserId;
   });
 
-  if (input.approvalRequired) {
-    await condition(() => approvalResolved);
-    if (!approved) {
-      return {
-        status: "cancelled",
-        note: `Approval was denied${resolvedByUserId ? ` by ${resolvedByUserId}` : ""}.`,
-        plannedActions: input.plannedActions,
-      };
-    }
-  }
+  while (true) {
+    const result = await advanceRunExecution(input);
 
-  const result = await executeAgentRun(input);
-  return {
-    status: "completed",
-    resolvedByUserId,
-    ...result,
-  };
+    if (result.status === "awaiting_approval") {
+      await condition(() => approvalResolved);
+      approvalResolved = false;
+      continue;
+    }
+
+    if (result.status === "running") {
+      continue;
+    }
+
+    return result;
+  }
 }
 
 export async function programPublicationWorkflow(input: ProgramPublicationWorkflowInput) {
-  const result = await publishProgramFile(input);
-  return {
-    status: "published",
-    ...result,
-  };
+  try {
+    const result = await publishProgramFile(input);
+    return {
+      status: "published",
+      ...result,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown publication failure.";
+    await handlePublicationFailure({
+      publicationId: input.publicationId,
+      message,
+    });
+    return {
+      status: "failed",
+      error: message,
+    };
+  }
 }

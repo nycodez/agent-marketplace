@@ -232,17 +232,17 @@ export function ProviderConnectionFlow({
     return metadata;
   };
 
-  const startMicrosoftOauth = async (integrationId: string) => {
+  const startOauthPopup = async (integrationId: string) => {
     if (typeof window === "undefined") {
       throw new Error("OAuth can only be started in a browser.");
     }
 
     const popup = window.open("", `oauth-${provider.key}`, "popup=yes,width=560,height=720");
     if (!popup) {
-      throw new Error("Allow pop-ups for this site to connect Microsoft 365.");
+      throw new Error(`Allow pop-ups for this site to connect ${provider.name}.`);
     }
 
-    popup.document.write("<p style='font-family: monospace;'>Opening Microsoft sign-in…</p>");
+    popup.document.write(`<p style='font-family: monospace;'>Opening ${provider.name} sign-in…</p>`);
 
     try {
       const started = await apiFetch<OauthStartResult>(`/organization-integrations/${integrationId}/oauth/start`, {
@@ -257,7 +257,7 @@ export function ProviderConnectionFlow({
         const closeWatcher = window.setInterval(() => {
           if (popup.closed) {
             cleanup();
-            reject(new Error("OAuth window was closed before Microsoft finished."));
+            reject(new Error(`OAuth window was closed before ${provider.name} finished.`));
           }
         }, 500);
 
@@ -330,8 +330,8 @@ export function ProviderConnectionFlow({
             : "Install created. Validate it before granting tools to teams.",
       );
 
-      if (provider.setupMode === "oauth" && provider.key === "microsoft-365") {
-        await startMicrosoftOauth(created.id);
+      if (provider.setupMode === "oauth" && (provider.key === "microsoft-365" || provider.key === "slack")) {
+        await startOauthPopup(created.id);
         await refreshIntegrations();
         setStatusMessage(`${provider.name} connected successfully.`);
       }
@@ -399,8 +399,8 @@ export function ProviderConnectionFlow({
     setStatusMessage(null);
 
     try {
-      if (provider.key === "microsoft-365") {
-        await startMicrosoftOauth(existingInstall.id);
+      if (provider.key === "microsoft-365" || provider.key === "slack") {
+        await startOauthPopup(existingInstall.id);
         await refreshIntegrations();
         setStatusMessage(`${provider.name} connected successfully.`);
         return;
@@ -804,8 +804,8 @@ export function ProviderConnectionFlow({
                 <>
                   <li>Create the install record with the scopes you want exposed to teams.</li>
                   <li>
-                    {provider.key === "microsoft-365"
-                      ? "Open the real Microsoft sign-in popup and finish the consent screen."
+                    {provider.key === "microsoft-365" || provider.key === "slack"
+                      ? `Open the real ${provider.name} sign-in popup and finish the consent screen.`
                       : "Complete the OAuth callback step to mark the provider connected."}
                   </li>
                   <li>Grant only the connected tools individual teams actually need.</li>

@@ -40,6 +40,16 @@ export const appConfig = {
     "MS_REDIRECT_URI",
     "http://localhost:4001/organization-integrations/oauth/microsoft-365/callback",
   ),
+  slackClientId: readOptional("SLACK_CLIENT_ID"),
+  slackClientSecret: readOptional("SLACK_CLIENT_SECRET"),
+  slackRedirectUri: readOptional(
+    "SLACK_REDIRECT_URI",
+    "http://localhost:4001/organization-integrations/oauth/slack/callback",
+  ),
+  baseSepoliaRpcUrl: readOptional("BASE_SEPOLIA_RPC_URL"),
+  basePublisherPrivateKey: readOptional("BASE_PUBLISHER_PRIVATE_KEY"),
+  arweaveWalletJwk: readOptional("ARWEAVE_WALLET_JWK"),
+  arweaveGatewayUrl: readOptional("ARWEAVE_GATEWAY_URL", "https://arweave.net"),
 };
 
 export type AppConfig = typeof appConfig;

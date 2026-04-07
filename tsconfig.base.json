@@ -22,10 +22,12 @@
       "@agent-marketplace/agent-runtime": [
         "packages/agent-runtime/src/index.ts"
       ],
+      "@agent-marketplace/database": [
+        "packages/database/src/index.ts"
+      ],
       "@agent-marketplace/ui": [
         "packages/ui/src/index.tsx"
       ]
     }
   }
 }
-

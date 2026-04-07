@@ -1,6 +1,6 @@
 import { Connection, Client } from "@temporalio/client";
 import { appConfig } from "@agent-marketplace/config";
-import type { OrchestrationRef, RunPlan } from "@agent-marketplace/contracts";
+import type { OrchestrationRef } from "@agent-marketplace/contracts";
 
 let clientPromise: Promise<Client> | null = null;
 
@@ -47,20 +47,8 @@ const withRunHandle = async (workflowId: string) => {
 
 export const startTemporalRunWorkflow = async ({
   runId,
-  workspaceId,
-  organizationId,
-  agentId,
-  approvalRequired,
-  plannedActions,
-  plan,
 }: {
   runId: string;
-  workspaceId: string;
-  organizationId: string;
-  agentId: string;
-  approvalRequired: boolean;
-  plannedActions: string[];
-  plan: RunPlan;
 }): Promise<OrchestrationRef> => {
   const workflowType = "agentRunWorkflow";
   const taskQueue = appConfig.temporalRunTaskQueue;
@@ -77,17 +65,7 @@ export const startTemporalRunWorkflow = async ({
     const handle = await client.workflow.start(workflowType, {
       taskQueue,
       workflowId: `run-${runId}`,
-      args: [
-        {
-          runId,
-          workspaceId,
-          organizationId,
-          agentId,
-          approvalRequired,
-          plannedActions,
-          plan,
-        },
-      ],
+      args: [{ runId }],
     });
 
     return {
@@ -111,18 +89,8 @@ export const startTemporalRunWorkflow = async ({
 
 export const startTemporalPublicationWorkflow = async ({
   publicationId,
-  programFileId,
-  organizationId,
-  workspaceId,
-  target,
-  programName,
 }: {
   publicationId: string;
-  programFileId: string;
-  organizationId: string;
-  workspaceId: string;
-  target: "base" | "arweave";
-  programName: string;
 }): Promise<OrchestrationRef> => {
   const workflowType = "programPublicationWorkflow";
   const taskQueue = appConfig.temporalPublicationTaskQueue;
@@ -139,16 +107,7 @@ export const startTemporalPublicationWorkflow = async ({
     const handle = await client.workflow.start(workflowType, {
       taskQueue,
       workflowId: `publication-${publicationId}`,
-      args: [
-        {
-          publicationId,
-          programFileId,
-          organizationId,
-          workspaceId,
-          target,
-          programName,
-        },
-      ],
+      args: [{ publicationId }],
     });
 
     return {
@@ -172,12 +131,8 @@ export const startTemporalPublicationWorkflow = async ({
 
 export const signalTemporalRunApproval = async ({
   workflowId,
-  approved,
-  resolvedByUserId,
 }: {
   workflowId: string;
-  approved: boolean;
-  resolvedByUserId: string;
 }) => {
   if (!appConfig.temporalEnabled) {
     return {
@@ -188,10 +143,7 @@ export const signalTemporalRunApproval = async ({
 
   try {
     const handle = await withRunHandle(workflowId);
-    await handle.signal("approvalResolved", {
-      approved,
-      resolvedByUserId,
-    });
+    await handle.signal("approvalResolved");
 
     return {
       success: true,

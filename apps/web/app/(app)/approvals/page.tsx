@@ -96,11 +96,23 @@ export default function ApprovalsPage() {
                 <p className="muted-copy">
                   Agent: {run.agent?.displayName ?? run.agentId}
                 </p>
+                {run.approvalRequest?.tool ? (
+                  <p className="muted-copy">
+                    Tool: {run.approvalRequest.tool}
+                    {run.approvalRequest.targetLabel ? ` · Target: ${run.approvalRequest.targetLabel}` : ""}
+                  </p>
+                ) : null}
                 <ul className="bullet-list">
                   {(run.approvalRequest?.requestedActions ?? run.plannedActions).map((action) => (
                     <li key={action}>{action}</li>
                   ))}
                 </ul>
+                {run.approvalRequest?.payload &&
+                Object.keys(run.approvalRequest.payload).length ? (
+                  <pre className="integration-details__metadata">
+                    {JSON.stringify(run.approvalRequest.payload, null, 2)}
+                  </pre>
+                ) : null}
                 <div className="row-between">
                   <MonochromeButton
                     type="button"

@@ -2,6 +2,7 @@ import type {
   AgentDraft,
   AgentSpec,
   AgentTeamDraft,
+  ApprovalPreview,
   ApprovalRequirement,
   DraftGenerationResult,
   OrganizationIntegration,
@@ -28,6 +29,127 @@ const slugify = (value: string) =>
     .replace(/^-+|-+$/g, "");
 
 const nowIso = () => new Date().toISOString();
+const isReadOnlyTool = (tool: string) =>
+  tool.includes(".read") || tool === "http.get" || tool.includes(".search");
+
+const buildStepArguments = ({
+  tool,
+  prompt,
+}: {
+  tool: string | null;
+  prompt?: string;
+}) => {
+  if (!tool) {
+    return {};
+  }
+
+  switch (tool) {
+    case "http.get":
+      return {
+        path: "/",
+        query: prompt ? { q: prompt.slice(0, 120) } : {},
+      };
+    case "http.post":
+    case "http.patch":
+      return {
+        path: "/",
+        body: {
+          prompt: prompt ?? "Execute the approved action.",
+        },
+      };
+    case "slack.read":
+      return {
+        limit: 10,
+      };
+    case "slack.post":
+      return {
+        text: prompt ? `Operator update: ${prompt}` : "Operator update ready for approval.",
+      };
+    case "slack.thread":
+      return {
+        threadTs: "REQUIRED_AT_EXECUTION",
+        text: prompt ? `Thread update: ${prompt}` : "Thread update ready for approval.",
+      };
+    default:
+      return {};
+  }
+};
+
+const buildApprovalPreview = ({
+  tool,
+  prompt,
+  args,
+}: {
+  tool: string;
+  prompt?: string;
+  args: Record<string, unknown>;
+}): ApprovalPreview => ({
+  summary: `Approve ${tool} for this run step.`,
+  requestedActions: [`Execute ${tool}`],
+  tool,
+  targetLabel:
+    typeof args.channelId === "string"
+      ? args.channelId
+      : typeof args.path === "string"
+        ? args.path
+        : null,
+  payload: {
+    prompt: prompt ?? null,
+    ...args,
+  },
+});
+
+const summarizeAgentGrantMap = ({
+  agents,
+  toolGrants,
+}: {
+  agents: AgentSpec[];
+  toolGrants: ToolGrant[];
+}) =>
+  new Map(
+    agents.map((candidate) => [
+      candidate.id,
+      new Set(
+        toolGrants
+          .filter((grant) => grant.agentId === candidate.id)
+          .flatMap((grant) => grant.tools),
+      ),
+    ]),
+  );
+
+const assignAgentForTool = ({
+  tool,
+  supervisor,
+  agents,
+  toolGrants,
+}: {
+  tool: string | null;
+  supervisor: AgentSpec;
+  agents: AgentSpec[];
+  toolGrants: ToolGrant[];
+}) => {
+  if (!tool) {
+    return supervisor.id;
+  }
+
+  const grantedToolMap = summarizeAgentGrantMap({
+    agents,
+    toolGrants,
+  });
+
+  const specialist = agents.find((candidate) => {
+    if (candidate.id === supervisor.id || candidate.status !== "active") {
+      return false;
+    }
+    return grantedToolMap.get(candidate.id)?.has(tool) ?? false;
+  });
+
+  if (specialist) {
+    return specialist.id;
+  }
+
+  return supervisor.id;
+};
 
 const inferRoleSeeds = (brief: string) => {
   const normalized = brief.toLowerCase();
@@ -142,15 +264,19 @@ const normalizeDraftGeneration = (result: DraftGenerationResult): DraftGeneratio
 });
 
 const fallbackRunPlan = ({
-  agent,
+  supervisor,
+  agents,
   prompt,
   executableTools,
   missingGrantTools,
+  toolGrants,
 }: {
-  agent: AgentSpec;
+  supervisor: AgentSpec;
+  agents: AgentSpec[];
   prompt?: string;
   executableTools: string[];
   missingGrantTools: string[];
+  toolGrants: ToolGrant[];
 }): RunPlan => {
   const stepChain: RunPlanStep[] = executableTools.length
     ? executableTools.map((tool, index) => ({
@@ -160,7 +286,32 @@ const fallbackRunPlan = ({
           index === 0
             ? "Review the current task context and collect the facts needed for execution."
             : `Use ${tool} to advance the current assignment.`,
-        tool: index === 0 && !tool.includes(".read") ? null : tool,
+        tool: index === 0 && !isReadOnlyTool(tool) ? null : tool,
+        assignedAgentId: assignAgentForTool({
+          tool: index === 0 && !isReadOnlyTool(tool) ? null : tool,
+          supervisor,
+          agents,
+          toolGrants,
+        }),
+        arguments: buildStepArguments({
+          tool: index === 0 && !isReadOnlyTool(tool) ? null : tool,
+          prompt,
+        }),
+        approvalPreview:
+          writeScopedTools.has(tool)
+            ? buildApprovalPreview({
+                tool,
+                prompt,
+                args: buildStepArguments({
+                  tool,
+                  prompt,
+                }),
+              })
+            : null,
+        handoffSummary:
+          index === 0
+            ? `${supervisor.displayName} prepares the execution context.`
+            : `Specialist executes ${tool} and returns the result to ${supervisor.displayName}.`,
         dependsOn: index === 0 ? [] : [`step-${index}`],
         requiresApproval: writeScopedTools.has(tool),
         kind: index === 0 ? "reason" : "tool_call",
@@ -171,6 +322,10 @@ const fallbackRunPlan = ({
           title: "Pause for setup",
           objective: "No granted tools are available yet, so stay in planning mode until integrations are connected.",
           tool: null,
+          assignedAgentId: supervisor.id,
+          arguments: {},
+          approvalPreview: null,
+          handoffSummary: `${supervisor.displayName} is waiting for a usable tool grant.`,
           dependsOn: [],
           requiresApproval: false,
           kind: "reason" as const,
@@ -182,9 +337,9 @@ const fallbackRunPlan = ({
     .map((step) => `Execute ${step.tool}`);
 
   return {
-    summary: `${agent.displayName} is preparing a run plan for the current task.`,
+    summary: `${supervisor.displayName} is coordinating a run for the current task.`,
     plannedActions: [
-      `Review ${agent.displayName.toLowerCase()} mission and current task brief`,
+      `Review ${supervisor.displayName.toLowerCase()} mission and current task brief`,
       prompt ? `Use prompt context: ${prompt}` : "Use workspace brief and latest configuration",
       `Operate with granted tools: ${executableTools.join(", ") || "none yet"}`,
       missingGrantTools.length
@@ -215,10 +370,27 @@ const normalizeRunPlan = ({
 
   const normalizedSteps = plan.steps.map((step, index) => {
     const tool = step.tool && allowedToolSet.has(step.tool) ? step.tool : null;
+    const args =
+      step.arguments && typeof step.arguments === "object" && !Array.isArray(step.arguments)
+        ? step.arguments
+        : {};
     return {
       ...step,
       id: step.id?.trim() ? step.id : `step-${index + 1}`,
       tool,
+      assignedAgentId:
+        typeof step.assignedAgentId === "string" && step.assignedAgentId.trim()
+          ? step.assignedAgentId
+          : null,
+      arguments: args,
+      approvalPreview:
+        tool && writeScopedTools.has(tool)
+          ? step.approvalPreview ?? buildApprovalPreview({ tool, args, prompt: undefined })
+          : null,
+      handoffSummary:
+        typeof step.handoffSummary === "string" && step.handoffSummary.trim()
+          ? step.handoffSummary
+          : null,
       requiresApproval: tool ? writeScopedTools.has(tool) : step.requiresApproval,
       dependsOn: step.dependsOn.filter(Boolean),
     };
@@ -278,12 +450,14 @@ export const publishAgentsFromDraft = (draft: AgentTeamDraft) => {
 
 export const planRun = async ({
   agent,
+  agents,
   prompt,
   integrations,
   toolGrants,
   userId,
 }: {
   agent: AgentSpec;
+  agents: AgentSpec[];
   prompt?: string;
   integrations: OrganizationIntegration[];
   toolGrants: ToolGrant[];
@@ -301,6 +475,12 @@ export const planRun = async ({
   const llmPlan = await generateRunPlanWithModel({
     mission: agent.mission,
     prompt,
+    agents: agents.map((candidate) => ({
+      id: candidate.id,
+      displayName: candidate.displayName,
+      mission: candidate.mission,
+      allowedTools: candidate.allowedTools,
+    })),
     executableTools,
     missingGrantTools,
     integrations,
@@ -310,10 +490,12 @@ export const planRun = async ({
     plan:
       llmPlan ??
       fallbackRunPlan({
-        agent,
+        supervisor: agent,
+        agents,
         prompt,
         executableTools,
         missingGrantTools,
+        toolGrants,
       }),
     executableTools,
     missingGrantTools,
@@ -324,7 +506,7 @@ export const planRun = async ({
     workspaceId: agent.workspaceId,
     agentId: agent.id,
     triggerType: "manual" satisfies TriggerType,
-    status: plan.requestedActions.length ? "awaiting_approval" : "running",
+    status: "queued",
     summary: plan.summary,
     plannedActions: plan.plannedActions,
     approvalRequirement: plan.requestedActions.length ? "required" : "not_required",
@@ -335,7 +517,15 @@ export const planRun = async ({
     runId: "",
     title: "Plan run",
     status: "completed",
+    tool: null,
+    assignedAgentId: agent.id,
+    attempt: 0,
     output: `Prepared ${plan.steps.length} execution steps using ${plan.plannerMode === "llm" ? `${plan.modelProviderKey}:${plan.modelName}` : "fallback planning"}.`,
+    errorCode: null,
+    startedAt: nowIso(),
+    finishedAt: nowIso(),
+    receipt: null,
+    inputSnapshot: null,
     metadata: {
       plan,
       generatedAt: nowIso(),
@@ -345,10 +535,20 @@ export const planRun = async ({
   const executionSteps: Array<Omit<RunStep, "id" | "createdAt" | "updatedAt">> = plan.steps.map((step, index) => ({
     runId: "",
     title: step.title,
-    status: plan.requestedActions.length ? "queued" : index === 0 ? "running" : "queued",
+    status: "queued",
+    tool: step.tool,
+    assignedAgentId: step.assignedAgentId,
+    attempt: 0,
     output: null,
+    errorCode: null,
+    startedAt: null,
+    finishedAt: null,
+    receipt: null,
+    inputSnapshot: step.arguments,
     metadata: {
       planStep: step,
+      handoffSummary: step.handoffSummary,
+      approvalPreview: step.approvalPreview,
       plannerMode: plan.plannerMode,
       modelProviderKey: plan.modelProviderKey,
       modelName: plan.modelName,
@@ -391,27 +591,26 @@ export const planPublication = ({
   integration: OrganizationIntegration | null;
   userId: string;
 }): Omit<PublicationRecord, "id" | "orchestration" | "createdAt" | "updatedAt"> => {
-  const gatewayUrl =
-    target === "base"
-      ? `https://basescan.org/address/${slugify(programFile.name)}`
-      : `https://arweave.net/${slugify(programFile.name)}`;
-
   return {
     organizationId: programFile.organizationId,
     workspaceId: programFile.workspaceId,
     programFileId: programFile.id,
     target,
-    status: integration ? "published" : "queued",
+    status: "queued",
     organizationIntegrationId: integration?.id ?? null,
     summary: `Prepared ${summarizeProgram(programFile)} for ${target} publication.`,
-    transactionId: integration ? `${target}_${slugify(programFile.name)}_${Date.now()}` : null,
-    gatewayUrl: integration ? gatewayUrl : null,
+    transactionId: null,
+    gatewayUrl: null,
+    explorerUrl: null,
+    contentHash: null,
+    network: null,
     metadata: {
       target,
       createdByUserId: userId,
       integrationStatus: integration?.status ?? "missing",
       tags: programFile.tags,
     },
+    receipt: null,
     createdByUserId: userId,
   };
 };

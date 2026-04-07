@@ -67,6 +67,32 @@ export const programFileSourceTypeSchema = z.enum([
   "text",
 ]);
 
+export const executionReceiptSchema = z.object({
+  providerKey: z.string(),
+  tool: z.string(),
+  summary: z.string(),
+  data: z.record(z.unknown()),
+});
+
+export const approvalPreviewSchema = z.object({
+  summary: z.string(),
+  requestedActions: z.array(z.string()),
+  tool: z.string().nullable(),
+  targetLabel: z.string().nullable(),
+  payload: z.record(z.unknown()),
+});
+
+export const publicationReceiptSchema = z.object({
+  target: publicationTargetSchema,
+  network: z.string(),
+  transactionId: z.string(),
+  explorerUrl: z.string().nullable(),
+  gatewayUrl: z.string().nullable(),
+  contentHash: z.string(),
+  metadataHash: z.string().nullable(),
+  data: z.record(z.unknown()),
+});
+
 export const agentDraftSchema = z.object({
   id: z.string(),
   roleName: z.string(),
@@ -199,6 +225,10 @@ export const runPlanStepSchema = z.object({
   title: z.string(),
   objective: z.string(),
   tool: z.string().nullable(),
+  assignedAgentId: z.string().nullable(),
+  arguments: z.record(z.unknown()),
+  approvalPreview: approvalPreviewSchema.nullable(),
+  handoffSummary: z.string().nullable(),
   dependsOn: z.array(z.string()),
   requiresApproval: z.boolean(),
   kind: z.enum(["reason", "tool_call", "approval", "output"]),
@@ -262,7 +292,11 @@ export const publicationRecordSchema = z.object({
   summary: z.string(),
   transactionId: z.string().nullable(),
   gatewayUrl: z.string().nullable(),
+  explorerUrl: z.string().nullable(),
+  contentHash: z.string().nullable(),
+  network: z.string().nullable(),
   metadata: z.record(z.unknown()),
+  receipt: publicationReceiptSchema.nullable(),
   orchestration: orchestrationRefSchema,
   createdByUserId: z.string(),
   createdAt: z.string(),
@@ -274,7 +308,15 @@ export const runStepSchema = z.object({
   runId: z.string(),
   title: z.string(),
   status: stepStatusSchema,
+  tool: z.string().nullable(),
+  assignedAgentId: z.string().nullable(),
+  attempt: z.number().int().nonnegative(),
   output: z.string().nullable(),
+  errorCode: z.string().nullable(),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  receipt: executionReceiptSchema.nullable(),
+  inputSnapshot: z.record(z.unknown()).nullable(),
   metadata: z.record(z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -283,9 +325,13 @@ export const runStepSchema = z.object({
 export const approvalRequestSchema = z.object({
   id: z.string(),
   runId: z.string(),
+  runStepId: z.string().nullable(),
   workspaceId: z.string(),
   status: approvalStatusSchema,
   summary: z.string(),
+  tool: z.string().nullable(),
+  targetLabel: z.string().nullable(),
+  payload: z.record(z.unknown()),
   requestedActions: z.array(z.string()),
   createdAt: z.string(),
   resolvedAt: z.string().nullable(),
@@ -412,6 +458,9 @@ export type ModelProviderKey = z.infer<typeof modelProviderKeySchema>;
 export type OrchestrationEngine = z.infer<typeof orchestrationEngineSchema>;
 export type OrchestrationStatus = z.infer<typeof orchestrationStatusSchema>;
 export type ProgramFileSourceType = z.infer<typeof programFileSourceTypeSchema>;
+export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
+export type ApprovalPreview = z.infer<typeof approvalPreviewSchema>;
+export type PublicationReceipt = z.infer<typeof publicationReceiptSchema>;
 export type AgentDraft = z.infer<typeof agentDraftSchema>;
 export type AgentTeamDraft = z.infer<typeof agentTeamDraftSchema>;
 export type AgentSpec = z.infer<typeof agentSpecSchema>;

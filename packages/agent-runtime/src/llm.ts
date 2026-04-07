@@ -75,12 +75,61 @@ const runPlanJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "title", "objective", "tool", "dependsOn", "requiresApproval", "kind"],
+        required: [
+          "id",
+          "title",
+          "objective",
+          "tool",
+          "assignedAgentId",
+          "arguments",
+          "approvalPreview",
+          "handoffSummary",
+          "dependsOn",
+          "requiresApproval",
+          "kind",
+        ],
         properties: {
           id: { type: "string" },
           title: { type: "string" },
           objective: { type: "string" },
           tool: {
+            anyOf: [{ type: "string" }, { type: "null" }],
+          },
+          assignedAgentId: {
+            anyOf: [{ type: "string" }, { type: "null" }],
+          },
+          arguments: {
+            type: "object",
+            additionalProperties: true,
+          },
+          approvalPreview: {
+            anyOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["summary", "requestedActions", "tool", "targetLabel", "payload"],
+                properties: {
+                  summary: { type: "string" },
+                  requestedActions: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                  tool: {
+                    anyOf: [{ type: "string" }, { type: "null" }],
+                  },
+                  targetLabel: {
+                    anyOf: [{ type: "string" }, { type: "null" }],
+                  },
+                  payload: {
+                    type: "object",
+                    additionalProperties: true,
+                  },
+                },
+              },
+              { type: "null" },
+            ],
+          },
+          handoffSummary: {
             anyOf: [{ type: "string" }, { type: "null" }],
           },
           dependsOn: {
@@ -630,12 +679,19 @@ export const generateDraftsWithModel = async ({
 export const generateRunPlanWithModel = async ({
   mission,
   prompt,
+  agents,
   executableTools,
   missingGrantTools,
   integrations,
 }: {
   mission: string;
   prompt?: string;
+  agents: Array<{
+    id: string;
+    displayName: string;
+    mission: string;
+    allowedTools: string[];
+  }>;
   executableTools: string[];
   missingGrantTools: string[];
   integrations: OrganizationIntegration[];
@@ -650,10 +706,13 @@ export const generateRunPlanWithModel = async ({
   const userPrompt = [
     `Agent mission:\n${mission}`,
     `Operator prompt:\n${prompt ?? "Use the latest agent context and workspace brief."}`,
+    `Available agents:\n${agents
+      .map((agent) => `- ${agent.id}: ${agent.displayName} | mission=${agent.mission} | tools=${agent.allowedTools.join(", ") || "none"}`)
+      .join("\n") || "None"}`,
     `Executable tools:\n${executableTools.join(", ") || "none"}`,
     `Missing or ungranted tools:\n${missingGrantTools.join(", ") || "none"}`,
     `Connected integration scopes:\n${stringifyToolCatalog(integrations)}`,
-    "Return only JSON matching the requested schema. Every tool_call step must reference one executable tool or null if no tool is needed.",
+    "Return only JSON matching the requested schema. Every tool_call step must reference one executable tool or null if no tool is needed. Assign each executable step to one available agent id. Add arguments for executable tools. For write steps, include an approvalPreview.",
   ].join("\n\n");
 
   try {

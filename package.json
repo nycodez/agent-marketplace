@@ -14,10 +14,12 @@
     "dev:web": "pnpm --filter @agent-marketplace/web dev",
     "dev:api": "pnpm --filter @agent-marketplace/api dev",
     "dev:worker": "pnpm --filter @agent-marketplace/worker dev",
+    "test": "vitest run",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
   }
 }

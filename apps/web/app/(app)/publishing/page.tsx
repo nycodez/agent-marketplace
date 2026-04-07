@@ -165,7 +165,7 @@ export default function PublishingPage() {
         }),
       });
       await load();
-      setStatusMessage(`Durability record queued for ${target}.`);
+      setStatusMessage(`Durability record submitted for ${target}.`);
     } catch (publishError) {
       setError(publishError instanceof Error ? publishError.message : `Unable to anchor to ${target}.`);
     } finally {
@@ -331,11 +331,13 @@ export default function PublishingPage() {
                     <StatusPill>{publication.status}</StatusPill>
                   </div>
                   <p className="muted-copy">
-                    Transaction: {publication.transactionId ?? "pending"} · Gateway:{" "}
-                    {publication.gatewayUrl ?? "not available"}
+                    Network: {publication.network ?? "pending"} · Transaction: {publication.transactionId ?? "pending"}
                   </p>
                   <p className="muted-copy">
-                    Temporal workflow: {publication.orchestration.workflowId ?? "not scheduled"}
+                    Gateway: {publication.gatewayUrl ?? "not available"} · Explorer: {publication.explorerUrl ?? "not available"}
+                  </p>
+                  <p className="muted-copy">
+                    Content hash: {publication.contentHash ?? "pending"} · Temporal workflow: {publication.orchestration.workflowId ?? "not scheduled"}
                   </p>
                 </div>
               ))}

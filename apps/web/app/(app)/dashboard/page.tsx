@@ -231,7 +231,9 @@ export default function DashboardPage() {
                   <td>{publication.target}</td>
                   <td>{publication.status}</td>
                   <td>{publication.transactionId ?? "queued"}</td>
-                  <td>{publication.summary} · {publication.orchestration.workflowId ?? "no temporal id"}</td>
+                  <td>
+                    {publication.summary} · {publication.network ?? "pending network"} · {publication.contentHash ?? "pending hash"}
+                  </td>
                 </tr>
               ))}
             </tbody>

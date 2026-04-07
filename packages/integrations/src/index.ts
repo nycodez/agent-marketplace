@@ -94,4 +94,5 @@ export const writeScopedTools = new Set(
 );
 
 export type { IntegrationProviderDefinition, IntegrationToolDefinition } from "./definitions";
+export * from "./execution";
 export * from "./providers";

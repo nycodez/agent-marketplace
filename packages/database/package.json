@@ -11,6 +11,8 @@
     "migrate:create": "tsx src/cli.ts create"
   },
   "dependencies": {
+    "@agent-marketplace/config": "workspace:*",
+    "@agent-marketplace/contracts": "workspace:*",
     "pg": "^8.15.6"
   },
   "devDependencies": {

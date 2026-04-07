@@ -10,10 +10,14 @@
   },
   "dependencies": {
     "@agent-marketplace/config": "workspace:*",
+    "@agent-marketplace/database": "workspace:*",
+    "@agent-marketplace/integrations": "workspace:*",
     "@temporalio/activity": "^1.11.5",
     "@temporalio/client": "^1.11.5",
     "@temporalio/worker": "^1.11.5",
-    "@temporalio/workflow": "^1.11.5"
+    "@temporalio/workflow": "^1.11.5",
+    "arweave": "^1.15.7",
+    "viem": "^2.21.57"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

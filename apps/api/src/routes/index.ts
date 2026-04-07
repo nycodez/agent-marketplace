@@ -30,6 +30,22 @@ import {
   testPlannerModelIntegration,
 } from "@agent-marketplace/agent-runtime";
 import { appConfig } from "@agent-marketplace/config";
+import {
+  approveCurrentRunApproval,
+  cancelRunExecution,
+  deleteSession,
+  getCurrentPendingApprovalForRun,
+  getProgramFileById,
+  getRunDetail,
+  insertAuditEvent,
+  insertPublicationRecord,
+  insertRunGraph,
+  listAuditEventsByWorkspace,
+  listPublicationsByProgramFile,
+  listRunsByWorkspace,
+  updatePublicationWorkflowStart,
+  updateRunWorkflowStart,
+} from "@agent-marketplace/database";
 import { findIntegrationProvider, integrationProviders } from "@agent-marketplace/integrations";
 import type { FastifyInstance } from "fastify";
 import { createSession, hashPassword, requireSession, verifyPassword } from "../lib/auth.js";
@@ -71,6 +87,7 @@ const slugify = (value: string) =>
 
 const modelProviderKeys = new Set(["openai", "anthropic", "grok", "gemini", "ollama"]);
 const MICROSOFT_365_PROVIDER_KEY = "microsoft-365";
+const SLACK_PROVIDER_KEY = "slack";
 const WHATSAPP_PROVIDER_KEY = "whatsapp";
 const MICROSOFT_365_SCOPES = [
   "openid",
@@ -84,6 +101,17 @@ const MICROSOFT_365_SCOPES = [
   "Files.Read.All",
 ];
 const DEFAULT_WHATSAPP_GRAPH_VERSION = "v23.0";
+const SLACK_SCOPES = [
+  "channels:history",
+  "channels:read",
+  "groups:history",
+  "groups:read",
+  "im:history",
+  "im:read",
+  "mpim:history",
+  "mpim:read",
+  "chat:write",
+];
 
 const maskSecretValue = (value: string) => {
   const lastFour = value.slice(-4);
@@ -114,8 +142,16 @@ const sanitizeIntegration = (integration: OrganizationIntegration) => ({
   metadata: sanitizeIntegrationMetadata(integration.metadata),
 });
 
+const toRecord = (value: unknown) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
 const microsoftOauthConfigured = () =>
   !!appConfig.microsoftClientId && !!appConfig.microsoftClientSecret && !!appConfig.microsoftRedirectUri;
+
+const slackOauthConfigured = () =>
+  !!appConfig.slackClientId && !!appConfig.slackClientSecret && !!appConfig.slackRedirectUri;
 
 const createOauthState = (payload: Record<string, string>) => {
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -223,6 +259,41 @@ const getMicrosoftAuthorizationUrl = ({
   return `https://login.microsoftonline.com/${appConfig.microsoftTenantId}/oauth2/v2.0/authorize?${query.toString()}`;
 };
 
+const getSlackAuthorizationUrl = ({
+  integration,
+}: {
+  integration: OrganizationIntegration;
+}) => {
+  if (!slackOauthConfigured()) {
+    throw new Error("Slack OAuth is not configured on this environment.");
+  }
+
+  const nonce = crypto.randomUUID();
+  integration.metadata = {
+    ...integration.metadata,
+    oauthNonce: nonce,
+    oauthRequestedAt: nowIso(),
+  };
+  integration.updatedAt = nowIso();
+
+  const state = createOauthState({
+    integrationId: integration.id,
+    organizationId: integration.organizationId,
+    providerKey: integration.providerKey,
+    nonce,
+  });
+
+  const query = new URLSearchParams({
+    client_id: appConfig.slackClientId!,
+    redirect_uri: appConfig.slackRedirectUri!,
+    scope: SLACK_SCOPES.join(","),
+    state,
+    user_scope: "",
+  });
+
+  return `https://slack.com/oauth/v2/authorize?${query.toString()}`;
+};
+
 const getWhatsAppConfig = (integration: OrganizationIntegration) => {
   const accessToken =
     typeof integration.metadata.accessToken === "string"
@@ -256,6 +327,56 @@ const getWhatsAppConfig = (integration: OrganizationIntegration) => {
     verifyToken,
     graphApiVersion,
   };
+};
+
+const exchangeSlackAuthorizationCode = async (code: string) => {
+  if (!slackOauthConfigured()) {
+    throw new Error("Slack OAuth is not configured on this environment.");
+  }
+
+  const response = await fetch("https://slack.com/api/oauth.v2.access", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: appConfig.slackClientId!,
+      client_secret: appConfig.slackClientSecret!,
+      code,
+      redirect_uri: appConfig.slackRedirectUri!,
+    }),
+  });
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(typeof payload.error === "string" ? payload.error : "Slack OAuth exchange failed.");
+  }
+
+  return payload;
+};
+
+const slackApi = async ({
+  token,
+  path,
+}: {
+  token: string;
+  path: string;
+}) => {
+  const response = await fetch(`https://slack.com/api/${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({}),
+  });
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(typeof payload.error === "string" ? payload.error : `Slack ${path} failed.`);
+  }
+
+  return payload;
 };
 
 const assertWhatsAppConfig = (integration: OrganizationIntegration) => {
@@ -769,6 +890,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
 
     const store = getStore();
     store.sessions = store.sessions.filter((session) => session.token !== authContext.session.token);
+    await deleteSession(authContext.session.token);
     return reply.send(ok({ loggedOut: true }));
   });
 
@@ -1271,22 +1393,33 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(404).send(fail("id", "Integration installation not found.", "exists"));
     }
 
-    if (integration.providerKey !== MICROSOFT_365_PROVIDER_KEY) {
+    if (
+      integration.providerKey !== MICROSOFT_365_PROVIDER_KEY &&
+      integration.providerKey !== SLACK_PROVIDER_KEY
+    ) {
       return reply.code(501).send(
         fail("provider", "Real OAuth start is not implemented for this provider yet.", "not_supported"),
       );
     }
 
-    if (!microsoftOauthConfigured()) {
+    if (
+      (integration.providerKey === MICROSOFT_365_PROVIDER_KEY && !microsoftOauthConfigured()) ||
+      (integration.providerKey === SLACK_PROVIDER_KEY && !slackOauthConfigured())
+    ) {
       return reply.code(503).send(
-        fail("provider", "Microsoft OAuth environment variables are not configured.", "config"),
+        fail("provider", `${integration.providerKey} OAuth environment variables are not configured.`, "config"),
       );
     }
 
-    const authorizationUrl = getMicrosoftAuthorizationUrl({
-      integration,
-      userEmail: authContext.user.email,
-    });
+    const authorizationUrl =
+      integration.providerKey === MICROSOFT_365_PROVIDER_KEY
+        ? getMicrosoftAuthorizationUrl({
+            integration,
+            userEmail: authContext.user.email,
+          })
+        : getSlackAuthorizationUrl({
+            integration,
+          });
 
     recordAuditEvent({
       organizationId: authContext.organization.id,
@@ -1427,6 +1560,125 @@ export const registerRoutes = async (app: FastifyInstance) => {
           message: error instanceof Error ? error.message : "Microsoft OAuth failed.",
           integrationId: null,
           providerKey: MICROSOFT_365_PROVIDER_KEY,
+        }),
+      );
+    }
+  });
+
+  app.get("/organization-integrations/oauth/slack/callback", async (request, reply) => {
+    const query = request.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    if (query.error) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: query.error_description ?? query.error,
+          integrationId: null,
+          providerKey: SLACK_PROVIDER_KEY,
+        }),
+      );
+    }
+
+    if (!query.code || !query.state) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: "Slack did not return a valid authorization code.",
+          integrationId: null,
+          providerKey: SLACK_PROVIDER_KEY,
+        }),
+      );
+    }
+
+    try {
+      const state = parseOauthState(query.state);
+      const integration = getStore().organizationIntegrations.find(
+        (candidate) =>
+          candidate.id === state.integrationId &&
+          candidate.organizationId === state.organizationId &&
+          candidate.providerKey === SLACK_PROVIDER_KEY,
+      );
+
+      if (!integration) {
+        throw new Error("Integration installation not found.");
+      }
+
+      const oauthNonce = typeof integration.metadata.oauthNonce === "string" ? integration.metadata.oauthNonce : null;
+      if (!oauthNonce || oauthNonce !== state.nonce) {
+        throw new Error("OAuth state validation failed.");
+      }
+
+      const tokenPayload = await exchangeSlackAuthorizationCode(query.code);
+      const botToken = typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
+      if (!botToken) {
+        throw new Error("Slack OAuth did not return a bot token.");
+      }
+
+      const authTest = await slackApi({
+        token: botToken,
+        path: "auth.test",
+      });
+
+      const incomingWebhook = toRecord(tokenPayload.incoming_webhook);
+      const team = toRecord(tokenPayload.team);
+
+      integration.metadata = withStoredIntegrationMetadata({
+        ...integration.metadata,
+        botToken,
+        teamId: typeof team.id === "string" ? team.id : authTest.team_id,
+        teamName: typeof team.name === "string" ? team.name : authTest.team,
+        botUserId: typeof tokenPayload.bot_user_id === "string" ? tokenPayload.bot_user_id : null,
+        scope: typeof tokenPayload.scope === "string" ? tokenPayload.scope : SLACK_SCOPES.join(","),
+        defaultChannelId:
+          typeof incomingWebhook.channel_id === "string" && incomingWebhook.channel_id
+            ? incomingWebhook.channel_id
+            : typeof integration.metadata.defaultChannelId === "string"
+              ? integration.metadata.defaultChannelId
+              : null,
+        oauthConnectedAt: nowIso(),
+      });
+      delete integration.metadata.oauthNonce;
+      delete integration.metadata.oauthRequestedAt;
+      integration.status = "connected";
+      integration.lastValidatedAt = nowIso();
+      integration.updatedAt = nowIso();
+
+      recordAuditEvent({
+        organizationId: integration.organizationId,
+        workspaceId: null,
+        userId: integration.createdByUserId,
+        eventType: "integration.oauth_completed",
+        entityType: "organization_integration",
+        entityId: integration.id,
+        payload: {
+          providerKey: integration.providerKey,
+          teamId: integration.metadata.teamId,
+          teamName: integration.metadata.teamName,
+        },
+      });
+
+      await persistStore();
+
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "success",
+          message: `${integration.displayName} connected successfully.`,
+          integrationId: integration.id,
+          providerKey: integration.providerKey,
+        }),
+      );
+    } catch (error) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: error instanceof Error ? error.message : "Slack OAuth failed.",
+          integrationId: null,
+          providerKey: SLACK_PROVIDER_KEY,
         }),
       );
     }
@@ -1649,6 +1901,73 @@ export const registerRoutes = async (app: FastifyInstance) => {
               providerKey: integration.providerKey,
               modelName: null,
               error: error instanceof Error ? error.message : "WhatsApp validation failed.",
+            },
+          }),
+        );
+      }
+    }
+
+    if (integration.providerKey === SLACK_PROVIDER_KEY) {
+      const botToken =
+        typeof integration.metadata.botToken === "string" ? integration.metadata.botToken.trim() : "";
+
+      if (!botToken) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: "Slack is not authorized yet. Complete the OAuth popup first.",
+            },
+          }),
+        );
+      }
+
+      try {
+        const authTest = await slackApi({
+          token: botToken,
+          path: "auth.test",
+        });
+
+        integration.metadata = withStoredIntegrationMetadata({
+          ...integration.metadata,
+          teamId:
+            typeof authTest.team_id === "string" ? authTest.team_id : integration.metadata.teamId,
+          teamName: typeof authTest.team === "string" ? authTest.team : integration.metadata.teamName,
+          oauthValidatedAt: nowIso(),
+        });
+        integration.status = "connected";
+        integration.lastValidatedAt = nowIso();
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: true,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: null,
+            },
+          }),
+        );
+      } catch (error) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: error instanceof Error ? error.message : "Slack validation failed.",
             },
           }),
         );
@@ -1915,11 +2234,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(404).send(fail("id", "Program file not found.", "exists"));
     }
 
-    const publications = getStore().publicationRecords.filter(
-      (candidate) => candidate.programFileId === programFile.id,
-    );
-
-    return reply.send(ok({ programFile, publications }));
+    return reply.send(ok({ programFile, publications: await listPublicationsByProgramFile(programFile.id) }));
   });
 
   app.patch("/program-files/:id", async (request, reply) => {
@@ -1992,11 +2307,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(404).send(fail("id", "Program file not found.", "exists"));
     }
 
-    const publications = getStore().publicationRecords.filter(
-      (candidate) => candidate.programFileId === programFile.id,
-    );
-
-    return reply.send(ok(publications));
+    return reply.send(ok(await listPublicationsByProgramFile(programFile.id)));
   });
 
   app.post("/program-files/:id/publish/:target", async (request, reply) => {
@@ -2015,9 +2326,10 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
     }
 
-    const programFile = getStore().programFiles.find(
-      (candidate) => candidate.id === params.id && candidate.workspaceId === authContext.workspace.id,
-    );
+    const programFile = await getProgramFileById({
+      programFileId: params.id,
+      workspaceId: authContext.workspace.id,
+    });
     if (!programFile) {
       return reply.code(404).send(fail("id", "Program file not found.", "exists"));
     }
@@ -2036,39 +2348,41 @@ export const registerRoutes = async (app: FastifyInstance) => {
       };
     }
 
-    publication.orchestration = await startTemporalPublicationWorkflow({
-      publicationId: publication.id,
-      programFileId: programFile.id,
-      organizationId: authContext.organization.id,
-      workspaceId: authContext.workspace.id,
-      target: params.target,
-      programName: programFile.name,
+    const createdPublication = await insertPublicationRecord(publication);
+    const orchestration = await startTemporalPublicationWorkflow({
+      publicationId: createdPublication.id,
     });
-    publication.status =
-      publication.orchestration.status === "started"
-        ? "processing"
-        : publication.orchestration.status === "unavailable"
-          ? "queued"
-          : publication.status;
-    publication.updatedAt = nowIso();
+    const persistedPublication =
+      (await updatePublicationWorkflowStart({
+        publicationId: createdPublication.id,
+        orchestration,
+        status:
+          orchestration.status === "started"
+            ? "processing"
+            : orchestration.status === "unavailable"
+              ? "queued"
+              : createdPublication.status,
+      })) ?? {
+        ...createdPublication,
+        orchestration,
+      };
 
-    getStore().publicationRecords.unshift(publication);
-    recordAuditEvent({
+    await insertAuditEvent({
       organizationId: authContext.organization.id,
       workspaceId: authContext.workspace.id,
       userId: authContext.user.id,
       eventType: `program_file.published.${params.target}`,
       entityType: "publication_record",
-      entityId: publication.id,
+      entityId: persistedPublication.id,
       payload: {
         programFileId: programFile.id,
-        status: publication.status,
-        transactionId: publication.transactionId,
-        orchestration: publication.orchestration,
+        status: persistedPublication.status,
+        transactionId: persistedPublication.transactionId,
+        orchestration: persistedPublication.orchestration,
       },
     });
 
-    return reply.code(201).send(ok(publication));
+    return reply.code(201).send(ok(persistedPublication));
   });
 
   app.get("/agent-team-drafts", async (request, reply) => {
@@ -2493,11 +2807,15 @@ export const registerRoutes = async (app: FastifyInstance) => {
         integration.organizationId === authContext.organization.id &&
         integration.status === "connected",
     );
+    const workspaceAgents = getStore().agents.filter(
+      (candidate) => candidate.workspaceId === authContext.workspace.id && candidate.status === "active",
+    );
     const toolGrants = getStore().toolGrants.filter(
-      (grant) => grant.agentId === agent.id && grant.workspaceId === authContext.workspace.id,
+      (grant) => grant.workspaceId === authContext.workspace.id,
     );
     const planned = await planRun({
       agent,
+      agents: workspaceAgents,
       prompt: parsed.data.prompt,
       integrations,
       toolGrants,
@@ -2505,24 +2823,11 @@ export const registerRoutes = async (app: FastifyInstance) => {
     });
 
     const runId = createId("run");
-    const approvalRequest: ApprovalRequest | null = planned.requestedActions.length
-      ? {
-          id: createId("approval"),
-          runId,
-          workspaceId: authContext.workspace.id,
-          status: "pending",
-          summary: `Review external actions for ${agent.displayName}`,
-          requestedActions: planned.requestedActions,
-          createdAt: nowIso(),
-          resolvedAt: null,
-        }
-      : null;
-
     const run: Run = {
       id: runId,
       createdAt: nowIso(),
       updatedAt: nowIso(),
-      approvalRequestId: approvalRequest?.id ?? null,
+      approvalRequestId: null,
       orchestration: createPendingOrchestration({
         workflowType: "agentRunWorkflow",
         taskQueue: appConfig.temporalRunTaskQueue,
@@ -2539,50 +2844,48 @@ export const registerRoutes = async (app: FastifyInstance) => {
       updatedAt: nowIso(),
     }));
 
-    getStore().runs.unshift(run);
-    getStore().runSteps.unshift(...steps);
-    if (approvalRequest) {
-      getStore().approvalRequests.unshift(approvalRequest);
-    }
-
-    run.orchestration = await startTemporalRunWorkflow({
-      runId: run.id,
-      workspaceId: run.workspaceId,
-      organizationId: run.organizationId,
-      agentId: run.agentId,
-      approvalRequired: run.approvalRequirement === "required",
-      plannedActions: run.plannedActions,
-      plan: planned.plan,
+    await insertRunGraph({
+      run,
+      steps,
     });
-    run.updatedAt = nowIso();
-    if (run.orchestration.status === "started" && run.status !== "awaiting_approval") {
-      run.status = "queued";
-    }
 
-    recordAuditEvent({
+    const orchestration = await startTemporalRunWorkflow({
+      runId: run.id,
+    });
+    const persistedRun =
+      (await updateRunWorkflowStart({
+        runId: run.id,
+        orchestration,
+        status: orchestration.status === "started" ? "queued" : run.status,
+      })) ?? {
+        ...run,
+        orchestration,
+      };
+
+    await insertAuditEvent({
       organizationId: authContext.organization.id,
       workspaceId: authContext.workspace.id,
       userId: authContext.user.id,
       eventType: "run.created",
       entityType: "run",
-      entityId: run.id,
+      entityId: persistedRun.id,
       payload: {
         agentId: agent.id,
-        status: run.status,
+        status: persistedRun.status,
         planner: {
           mode: planned.plan.plannerMode,
           providerKey: planned.plan.modelProviderKey,
           modelName: planned.plan.modelName,
         },
-        orchestration: run.orchestration,
+        orchestration: persistedRun.orchestration,
       },
     });
 
     return reply.code(201).send(
       ok({
-        run,
+        run: persistedRun,
         steps,
-        approvalRequest,
+        approvalRequest: null,
         plan: planned.plan,
       }),
     );
@@ -2594,16 +2897,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return;
     }
 
-    const runs = getStore().runs
-      .filter((run) => run.workspaceId === authContext.workspace.id)
-      .map((run) => ({
-        ...run,
-        agent: getStore().agents.find((agent) => agent.id === run.agentId) ?? null,
-        approvalRequest:
-          getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null,
-      }));
-
-    return reply.send(ok(runs));
+    return reply.send(ok(await listRunsByWorkspace(authContext.workspace.id)));
   });
 
   app.get("/runs/:id", async (request, reply) => {
@@ -2612,20 +2906,14 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return;
     }
 
-    const run = getStore().runs.find(
-      (candidate) =>
-        candidate.id === (request.params as { id: string }).id &&
-        candidate.workspaceId === authContext.workspace.id,
-    );
-    if (!run) {
+    const detail = await getRunDetail({
+      runId: (request.params as { id: string }).id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!detail) {
       return reply.code(404).send(fail("id", "Run not found.", "exists"));
     }
-
-    const steps = getStore().runSteps.filter((step) => step.runId === run.id);
-    const approvalRequest =
-      getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null;
-
-    return reply.send(ok({ run, steps, approvalRequest }));
+    return reply.send(ok(detail));
   });
 
   app.post("/runs/:id/approve", async (request, reply) => {
@@ -2634,62 +2922,50 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return;
     }
 
-    const run = getStore().runs.find(
-      (candidate) =>
-        candidate.id === (request.params as { id: string }).id &&
-        candidate.workspaceId === authContext.workspace.id,
-    );
-    if (!run) {
+    const detail = await getRunDetail({
+      runId: (request.params as { id: string }).id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!detail) {
       return reply.code(404).send(fail("id", "Run not found.", "exists"));
     }
-
-    const approvalRequest =
-      getStore().approvalRequests.find((approval) => approval.id === run.approvalRequestId) ?? null;
+    const run = detail.run;
+    const approvalRequest = await getCurrentPendingApprovalForRun(run.id);
     if (!approvalRequest) {
       return reply.code(422).send(fail("approval", "This run does not require approval."));
     }
 
-    approvalRequest.status = "approved";
-    approvalRequest.resolvedAt = nowIso();
-    run.status = "queued";
-    run.updatedAt = nowIso();
-
-    const pendingStep = getStore().runSteps.find(
-      (step) => step.runId === run.id && step.status === "queued",
-    );
-    if (pendingStep) {
-      pendingStep.status = "running";
-      pendingStep.output = "Approval granted. Temporal workflow resumed.";
-      pendingStep.updatedAt = nowIso();
-    }
+    const approved = await approveCurrentRunApproval({
+      runId: run.id,
+    });
+    const persistedRun = approved?.run ?? run;
+    const persistedApproval = approved?.approvalRequest ?? approvalRequest;
 
     if (run.orchestration.workflowId) {
       const signalResult = await signalTemporalRunApproval({
         workflowId: run.orchestration.workflowId,
-        approved: true,
-        resolvedByUserId: authContext.user.id,
       });
 
       if (!signalResult.success) {
-        run.orchestration.status = "failed_to_start";
-        run.orchestration.lastError = signalResult.error;
+        persistedRun.orchestration.status = "failed_to_start";
+        persistedRun.orchestration.lastError = signalResult.error;
       }
     }
 
-    recordAuditEvent({
+    await insertAuditEvent({
       organizationId: authContext.organization.id,
       workspaceId: authContext.workspace.id,
       userId: authContext.user.id,
       eventType: "run.approved",
       entityType: "run",
-      entityId: run.id,
+      entityId: persistedRun.id,
       payload: {
-        approvalRequestId: approvalRequest.id,
-        orchestration: run.orchestration,
+        approvalRequestId: persistedApproval.id,
+        orchestration: persistedRun.orchestration,
       },
     });
 
-    return reply.send(ok({ run, approvalRequest }));
+    return reply.send(ok({ run: persistedRun, approvalRequest: persistedApproval }));
   });
 
   app.post("/runs/:id/cancel", async (request, reply) => {
@@ -2698,45 +2974,36 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return;
     }
 
-    const run = getStore().runs.find(
-      (candidate) =>
-        candidate.id === (request.params as { id: string }).id &&
-        candidate.workspaceId === authContext.workspace.id,
-    );
-    if (!run) {
+    const detail = await getRunDetail({
+      runId: (request.params as { id: string }).id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!detail) {
       return reply.code(404).send(fail("id", "Run not found.", "exists"));
     }
+    const run = detail.run;
 
-    run.status = "cancelled";
-    run.updatedAt = nowIso();
+    const cancelledRun = (await cancelRunExecution({ runId: run.id })) ?? run;
     if (run.orchestration.workflowId) {
       const cancelResult = await cancelTemporalRunWorkflow(run.orchestration.workflowId);
       if (!cancelResult.success) {
-        run.orchestration.lastError = cancelResult.error;
+        cancelledRun.orchestration.lastError = cancelResult.error;
       }
     }
-    const activeSteps = getStore().runSteps.filter(
-      (step) => step.runId === run.id && (step.status === "queued" || step.status === "running"),
-    );
-    for (const step of activeSteps) {
-      step.status = "skipped";
-      step.output = "Cancelled by operator.";
-      step.updatedAt = nowIso();
-    }
 
-    recordAuditEvent({
+    await insertAuditEvent({
       organizationId: authContext.organization.id,
       workspaceId: authContext.workspace.id,
       userId: authContext.user.id,
       eventType: "run.cancelled",
       entityType: "run",
-      entityId: run.id,
+      entityId: cancelledRun.id,
       payload: {
-        orchestration: run.orchestration,
+        orchestration: cancelledRun.orchestration,
       },
     });
 
-    return reply.send(ok(run));
+    return reply.send(ok(cancelledRun));
   });
 
   app.get("/events/webhooks/whatsapp", async (request, reply) => {
@@ -2862,12 +3129,13 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return;
     }
 
-    const events = getStore().auditEvents.filter(
-      (event) =>
-        event.organizationId === authContext.organization.id &&
-        (!event.workspaceId || event.workspaceId === authContext.workspace.id),
+    return reply.send(
+      ok(
+        await listAuditEventsByWorkspace({
+          organizationId: authContext.organization.id,
+          workspaceId: authContext.workspace.id,
+        }),
+      ),
     );
-
-    return reply.send(ok(events));
   });
 };
