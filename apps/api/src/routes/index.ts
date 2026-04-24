@@ -1,14 +1,25 @@
 import crypto from "node:crypto";
 import {
+  agentChatThreadStatusSchema,
+  createAgentChatMessageInputSchema,
+  createAgentChatThreadInputSchema,
+  createWebsiteCredentialInputSchema,
+  createLearningLibrarySourceInputSchema,
   createToolGrantInputSchema,
   createProgramFileInputSchema,
   createDraftInputSchema,
   installIntegrationInputSchema,
+  learningLibrarySourceTypeSchema,
+  learningLibraryStatusSchema,
+  learningLibraryQueryInputSchema,
   loginInputSchema,
   magicLinkInputSchema,
   publishProgramFileInputSchema,
+  reindexLearningLibraryInputSchema,
   registerInputSchema,
   runCreateInputSchema,
+  updateLearningLibrarySourceInputSchema,
+  updateWebsiteCredentialInputSchema,
   type ProgramFile,
   type PublicationRecord,
   updateIntegrationInputSchema,
@@ -21,8 +32,10 @@ import {
   type OrganizationIntegration,
   type Run,
   type RunStep,
+  type WebsiteCredential,
 } from "@agent-marketplace/contracts";
 import {
+  generateChatReply,
   generateAgentDraftsFromBrief,
   planPublication,
   planRun,
@@ -32,17 +45,34 @@ import {
 import { appConfig } from "@agent-marketplace/config";
 import {
   approveCurrentRunApproval,
+  archiveAgentChatThread,
   cancelRunExecution,
+  createAgentChatThread,
+  deleteLearningLibrarySource,
+  createWebsiteCredential,
+  deleteWebsiteCredential,
   deleteSession,
+  getAgentChatDetail,
   getCurrentPendingApprovalForRun,
   getProgramFileById,
   getRunDetail,
+  indexLearningLibraryContent,
   insertAuditEvent,
+  insertAgentChatMessage,
   insertPublicationRecord,
   insertRunGraph,
+  listAgentChatThreads,
+  listLearningLibrarySources,
+  listWebsiteCredentialsByWorkspace,
   listAuditEventsByWorkspace,
   listPublicationsByProgramFile,
   listRunsByWorkspace,
+  purgeLearningLibrary,
+  queryLearningLibrary,
+  resumeAgentChatThread,
+  reindexLearningLibraryWorkspace,
+  updateLearningLibrarySource,
+  updateWebsiteCredential,
   updatePublicationWorkflowStart,
   updateRunWorkflowStart,
 } from "@agent-marketplace/database";
@@ -85,9 +115,16 @@ const slugify = (value: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+const titleFromMessage = (message: string) => {
+  const title = message.trim().replace(/\s+/g, " ").slice(0, 72);
+  return title || "New chat";
+};
+
 const modelProviderKeys = new Set(["openai", "anthropic", "grok", "gemini", "ollama"]);
+const GOOGLE_WORKSPACE_PROVIDER_KEY = "google-workspace";
 const MICROSOFT_365_PROVIDER_KEY = "microsoft-365";
 const SLACK_PROVIDER_KEY = "slack";
+const PLAYWRIGHT_BROWSER_PROVIDER_KEY = "playwright-browser";
 const WHATSAPP_PROVIDER_KEY = "whatsapp";
 const MICROSOFT_365_SCOPES = [
   "openid",
@@ -111,6 +148,16 @@ const SLACK_SCOPES = [
   "mpim:history",
   "mpim:read",
   "chat:write",
+];
+const GOOGLE_WORKSPACE_SCOPES = [
+  "openid",
+  "email",
+  "profile",
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
 ];
 
 const maskSecretValue = (value: string) => {
@@ -142,6 +189,14 @@ const sanitizeIntegration = (integration: OrganizationIntegration) => ({
   metadata: sanitizeIntegrationMetadata(integration.metadata),
 });
 
+const hasConnectedOauthTokens = (integration: OrganizationIntegration) => {
+  if (integration.providerKey === MICROSOFT_365_PROVIDER_KEY || integration.providerKey === GOOGLE_WORKSPACE_PROVIDER_KEY) {
+    return typeof integration.metadata.refreshToken === "string";
+  }
+
+  return true;
+};
+
 const toRecord = (value: unknown) =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -152,6 +207,9 @@ const microsoftOauthConfigured = () =>
 
 const slackOauthConfigured = () =>
   !!appConfig.slackClientId && !!appConfig.slackClientSecret && !!appConfig.slackRedirectUri;
+
+const googleOauthConfigured = () =>
+  !!appConfig.googleClientId && !!appConfig.googleClientSecret && !!appConfig.googleRedirectUri;
 
 const createOauthState = (payload: Record<string, string>) => {
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -294,6 +352,50 @@ const getSlackAuthorizationUrl = ({
   return `https://slack.com/oauth/v2/authorize?${query.toString()}`;
 };
 
+const getGoogleAuthorizationUrl = ({
+  integration,
+  userEmail,
+}: {
+  integration: OrganizationIntegration;
+  userEmail?: string;
+}) => {
+  if (!googleOauthConfigured()) {
+    throw new Error("Google OAuth is not configured on this environment.");
+  }
+
+  const nonce = crypto.randomUUID();
+  integration.metadata = {
+    ...integration.metadata,
+    oauthNonce: nonce,
+    oauthRequestedAt: nowIso(),
+  };
+  integration.updatedAt = nowIso();
+
+  const state = createOauthState({
+    integrationId: integration.id,
+    organizationId: integration.organizationId,
+    providerKey: integration.providerKey,
+    nonce,
+  });
+
+  const query = new URLSearchParams({
+    client_id: appConfig.googleClientId!,
+    redirect_uri: appConfig.googleRedirectUri!,
+    response_type: "code",
+    access_type: "offline",
+    include_granted_scopes: "true",
+    prompt: "consent",
+    scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
+    state,
+  });
+
+  if (userEmail) {
+    query.set("login_hint", userEmail);
+  }
+
+  return `https://accounts.google.com/o/oauth2/v2/auth?${query.toString()}`;
+};
+
 const getWhatsAppConfig = (integration: OrganizationIntegration) => {
   const accessToken =
     typeof integration.metadata.accessToken === "string"
@@ -353,6 +455,71 @@ const exchangeSlackAuthorizationCode = async (code: string) => {
   }
 
   return payload;
+};
+
+const exchangeGoogleAuthorizationCode = async (code: string) => {
+  if (!googleOauthConfigured()) {
+    throw new Error("Google OAuth is not configured on this environment.");
+  }
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: appConfig.googleClientId!,
+      client_secret: appConfig.googleClientSecret!,
+      redirect_uri: appConfig.googleRedirectUri!,
+      grant_type: "authorization_code",
+      code,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google token exchange failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
+};
+
+const refreshGoogleAccessToken = async (refreshToken: string) => {
+  if (!googleOauthConfigured()) {
+    throw new Error("Google OAuth is not configured on this environment.");
+  }
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: appConfig.googleClientId!,
+      client_secret: appConfig.googleClientSecret!,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google token refresh failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
+};
+
+const getGoogleProfile = async (accessToken: string) => {
+  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google profile lookup failed: ${await response.text()}`);
+  }
+
+  return (await response.json()) as Record<string, unknown>;
 };
 
 const slackApi = async ({
@@ -1130,13 +1297,15 @@ export const registerRoutes = async (app: FastifyInstance) => {
       return reply.code(422).send(fail("member", "email, name, and role are required."));
     }
 
+    const email = payload.email.trim();
+    const name = payload.name.trim();
     const store = getStore();
-    let user = store.users.find((candidate) => candidate.email === payload.email.trim()) ?? null;
+    let user = store.users.find((candidate) => candidate.email === email) ?? null;
     if (!user) {
       user = {
         id: createId("user"),
-        email: payload.email.trim(),
-        name: payload.name.trim(),
+        email,
+        name,
         passwordHash: hashPassword(createId("invite")),
         createdAt: nowIso(),
       };
@@ -1217,6 +1386,124 @@ export const registerRoutes = async (app: FastifyInstance) => {
     return reply.send(ok(installations.map(sanitizeIntegration)));
   });
 
+  app.get("/website-credentials", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const credentials = await listWebsiteCredentialsByWorkspace({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+
+    return reply.send(ok(credentials));
+  });
+
+  app.post("/website-credentials", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createWebsiteCredentialInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const credential = await createWebsiteCredential({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      createdByUserId: authContext.user.id,
+      input: parsed.data,
+    });
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "website_credential.created",
+      entityType: "website_credential",
+      entityId: credential.id,
+      payload: {
+        origin: credential.origin,
+        label: credential.label,
+      },
+    });
+
+    return reply.code(201).send(ok(credential));
+  });
+
+  app.patch("/website-credentials/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = updateWebsiteCredentialInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const credential = await updateWebsiteCredential({
+      credentialId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      input: parsed.data,
+    });
+
+    if (!credential) {
+      return reply.code(404).send(fail("id", "Website credential not found.", "exists"));
+    }
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "website_credential.updated",
+      entityType: "website_credential",
+      entityId: credential.id,
+      payload: {
+        origin: credential.origin,
+        label: credential.label,
+      },
+    });
+
+    return reply.send(ok(credential));
+  });
+
+  app.delete("/website-credentials/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const credential = await deleteWebsiteCredential({
+      credentialId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+
+    if (!credential) {
+      return reply.code(404).send(fail("id", "Website credential not found.", "exists"));
+    }
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "website_credential.deleted",
+      entityType: "website_credential",
+      entityId: credential.id,
+      payload: {
+        origin: credential.origin,
+        label: credential.label,
+      },
+    });
+
+    return reply.send(ok(credential));
+  });
+
   app.post("/organization-integrations/:provider/install", async (request, reply) => {
     const authContext = await requireSession(request, reply);
     if (!authContext) {
@@ -1262,6 +1549,8 @@ export const registerRoutes = async (app: FastifyInstance) => {
       },
     });
 
+    await persistStore();
+
     return reply.code(201).send(
       ok(sanitizeIntegration(installation), {
         nextAction:
@@ -1276,7 +1565,9 @@ export const registerRoutes = async (app: FastifyInstance) => {
                   ? "Store the provider API key in metadata.apiKey, optionally set metadata.defaultModel and metadata.defaultForPlanning, then run a test."
                 : "Store and verify the API key out of band."
               : provider.setupMode === "wallet"
-                ? "Connect a publishing wallet or signer, then verify the install."
+              ? "Connect a publishing wallet or signer, then verify the install."
+              : provider.setupMode === "credentials"
+                ? "Select a default saved credential if you want one, then validate the browser runtime."
                 : "Send events to the webhook endpoint to activate runs.",
       }),
     );
@@ -1328,6 +1619,8 @@ export const registerRoutes = async (app: FastifyInstance) => {
       },
     });
 
+    await persistStore();
+
     return reply.send(ok(sanitizeIntegration(integration)));
   });
 
@@ -1369,6 +1662,8 @@ export const registerRoutes = async (app: FastifyInstance) => {
       },
     });
 
+    await persistStore();
+
     return reply.send(
       ok({
         integration: sanitizeIntegration(integration),
@@ -1394,6 +1689,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
     }
 
     if (
+      integration.providerKey !== GOOGLE_WORKSPACE_PROVIDER_KEY &&
       integration.providerKey !== MICROSOFT_365_PROVIDER_KEY &&
       integration.providerKey !== SLACK_PROVIDER_KEY
     ) {
@@ -1403,6 +1699,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
     }
 
     if (
+      (integration.providerKey === GOOGLE_WORKSPACE_PROVIDER_KEY && !googleOauthConfigured()) ||
       (integration.providerKey === MICROSOFT_365_PROVIDER_KEY && !microsoftOauthConfigured()) ||
       (integration.providerKey === SLACK_PROVIDER_KEY && !slackOauthConfigured())
     ) {
@@ -1412,7 +1709,12 @@ export const registerRoutes = async (app: FastifyInstance) => {
     }
 
     const authorizationUrl =
-      integration.providerKey === MICROSOFT_365_PROVIDER_KEY
+      integration.providerKey === GOOGLE_WORKSPACE_PROVIDER_KEY
+        ? getGoogleAuthorizationUrl({
+            integration,
+            userEmail: authContext.user.email,
+          })
+        : integration.providerKey === MICROSOFT_365_PROVIDER_KEY
         ? getMicrosoftAuthorizationUrl({
             integration,
             userEmail: authContext.user.email,
@@ -1560,6 +1862,117 @@ export const registerRoutes = async (app: FastifyInstance) => {
           message: error instanceof Error ? error.message : "Microsoft OAuth failed.",
           integrationId: null,
           providerKey: MICROSOFT_365_PROVIDER_KEY,
+        }),
+      );
+    }
+  });
+
+  app.get("/organization-integrations/oauth/google-workspace/callback", async (request, reply) => {
+    const query = request.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    if (query.error) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: query.error_description ?? query.error,
+          integrationId: null,
+          providerKey: GOOGLE_WORKSPACE_PROVIDER_KEY,
+        }),
+      );
+    }
+
+    if (!query.code || !query.state) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: "Google did not return a valid authorization code.",
+          integrationId: null,
+          providerKey: GOOGLE_WORKSPACE_PROVIDER_KEY,
+        }),
+      );
+    }
+
+    try {
+      const state = parseOauthState(query.state);
+      const integration = getStore().organizationIntegrations.find(
+        (candidate) =>
+          candidate.id === state.integrationId &&
+          candidate.organizationId === state.organizationId &&
+          candidate.providerKey === GOOGLE_WORKSPACE_PROVIDER_KEY,
+      );
+
+      if (!integration) {
+        throw new Error("Integration installation not found.");
+      }
+
+      const oauthNonce = typeof integration.metadata.oauthNonce === "string" ? integration.metadata.oauthNonce : null;
+      if (!oauthNonce || oauthNonce !== state.nonce) {
+        throw new Error("OAuth state validation failed.");
+      }
+
+      const tokenPayload = await exchangeGoogleAuthorizationCode(query.code);
+      const accessToken = typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
+      const refreshToken = typeof tokenPayload.refresh_token === "string" ? tokenPayload.refresh_token : null;
+      if (!accessToken || !refreshToken) {
+        throw new Error("Google OAuth did not return the required tokens.");
+      }
+
+      const profile = await getGoogleProfile(accessToken);
+      const email =
+        typeof profile.emailAddress === "string" && profile.emailAddress
+          ? profile.emailAddress
+          : null;
+
+      integration.metadata = withStoredIntegrationMetadata({
+        ...integration.metadata,
+        refreshToken,
+        scope: typeof tokenPayload.scope === "string" ? tokenPayload.scope : GOOGLE_WORKSPACE_SCOPES.join(" "),
+        tokenType: typeof tokenPayload.token_type === "string" ? tokenPayload.token_type : "Bearer",
+        providerAccountId: typeof profile.historyId === "string" ? profile.historyId : null,
+        accountEmail: email,
+        oauthConnectedAt: nowIso(),
+      });
+      delete integration.metadata.oauthNonce;
+      delete integration.metadata.oauthRequestedAt;
+      integration.status = "connected";
+      integration.lastValidatedAt = nowIso();
+      integration.updatedAt = nowIso();
+
+      recordAuditEvent({
+        organizationId: integration.organizationId,
+        workspaceId: null,
+        userId: integration.createdByUserId,
+        eventType: "integration.oauth_completed",
+        entityType: "organization_integration",
+        entityId: integration.id,
+        payload: {
+          providerKey: integration.providerKey,
+          accountEmail: email,
+        },
+      });
+
+      await persistStore();
+
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "success",
+          message: `${integration.displayName} connected successfully.`,
+          integrationId: integration.id,
+          providerKey: integration.providerKey,
+        }),
+      );
+    } catch (error) {
+      return reply.type("text/html").send(
+        encodePopupResultHtml({
+          status: "error",
+          message: error instanceof Error ? error.message : "Google OAuth failed.",
+          integrationId: null,
+          providerKey: GOOGLE_WORKSPACE_PROVIDER_KEY,
         }),
       );
     }
@@ -1822,6 +2235,95 @@ export const registerRoutes = async (app: FastifyInstance) => {
       }
     }
 
+    if (integration.providerKey === GOOGLE_WORKSPACE_PROVIDER_KEY) {
+      const refreshToken =
+        typeof integration.metadata.refreshToken === "string" ? integration.metadata.refreshToken : null;
+
+      if (!refreshToken) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+        await persistStore();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: "Google Workspace is not authorized yet. Complete the OAuth popup first.",
+            },
+          }),
+        );
+      }
+
+      try {
+        const tokenPayload = await refreshGoogleAccessToken(refreshToken);
+        const accessToken =
+          typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
+        if (!accessToken) {
+          throw new Error("Google did not return an access token.");
+        }
+
+        const profile = await getGoogleProfile(accessToken);
+        const nextRefreshToken =
+          typeof tokenPayload.refresh_token === "string" ? tokenPayload.refresh_token : refreshToken;
+        const email =
+          typeof profile.emailAddress === "string" && profile.emailAddress
+            ? profile.emailAddress
+            : typeof integration.metadata.accountEmail === "string"
+              ? integration.metadata.accountEmail
+              : null;
+
+        integration.metadata = withStoredIntegrationMetadata({
+          ...integration.metadata,
+          refreshToken: nextRefreshToken,
+          scope:
+            typeof tokenPayload.scope === "string" ? tokenPayload.scope : integration.metadata.scope,
+          tokenType:
+            typeof tokenPayload.token_type === "string"
+              ? tokenPayload.token_type
+              : integration.metadata.tokenType,
+          providerAccountId:
+            typeof profile.historyId === "string" ? profile.historyId : integration.metadata.providerAccountId,
+          accountEmail: email,
+          oauthValidatedAt: nowIso(),
+        });
+        integration.status = "connected";
+        integration.lastValidatedAt = nowIso();
+        integration.updatedAt = nowIso();
+        await persistStore();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: true,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: null,
+            },
+          }),
+        );
+      } catch (error) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+        await persistStore();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: error instanceof Error ? error.message : "Google Workspace validation failed.",
+            },
+          }),
+        );
+      }
+    }
+
     if (integration.providerKey === WHATSAPP_PROVIDER_KEY) {
       try {
         const config = assertWhatsAppConfig(integration);
@@ -1974,6 +2476,57 @@ export const registerRoutes = async (app: FastifyInstance) => {
       }
     }
 
+    if (integration.providerKey === PLAYWRIGHT_BROWSER_PROVIDER_KEY) {
+      const defaultCredentialId =
+        typeof integration.metadata.defaultCredentialId === "string"
+          ? integration.metadata.defaultCredentialId.trim()
+          : "";
+      const availableCredentials = await listWebsiteCredentialsByWorkspace({
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+      });
+      const defaultCredential =
+        defaultCredentialId
+          ? availableCredentials.find((credential: WebsiteCredential) => credential.id === defaultCredentialId) ?? null
+          : null;
+
+      if (defaultCredentialId && !defaultCredential) {
+        integration.status = "failed";
+        integration.updatedAt = nowIso();
+        await persistStore();
+
+        return reply.send(
+          ok({
+            integration: sanitizeIntegration(integration),
+            healthy: false,
+            planner: {
+              providerKey: integration.providerKey,
+              modelName: null,
+              error: `Default website credential ${defaultCredentialId} was not found in this workspace.`,
+            },
+          }),
+        );
+      }
+
+      integration.status = "connected";
+      integration.lastValidatedAt = nowIso();
+      integration.updatedAt = nowIso();
+      await persistStore();
+
+      return reply.send(
+        ok({
+          integration: sanitizeIntegration(integration),
+          healthy: true,
+          planner: {
+            providerKey: integration.providerKey,
+            modelName: null,
+            error: null,
+          },
+          defaultCredential,
+        }),
+      );
+    }
+
     if (modelProviderKeys.has(integration.providerKey)) {
       const probe = await testPlannerModelIntegration(integration);
       integration.status = probe.healthy ? "connected" : "failed";
@@ -1996,6 +2549,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
     integration.status = "connected";
     integration.lastValidatedAt = nowIso();
     integration.updatedAt = nowIso();
+    await persistStore();
 
     return reply.send(
       ok({
@@ -2176,6 +2730,516 @@ export const registerRoutes = async (app: FastifyInstance) => {
     return reply.send(ok(programFiles));
   });
 
+  app.get("/agent-chats", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const query = request.query as { status?: string };
+    const parsedStatus = query.status ? agentChatThreadStatusSchema.safeParse(query.status) : null;
+    if (parsedStatus && !parsedStatus.success) {
+      return reply.code(422).send(fail("status", "Invalid chat thread status."));
+    }
+
+    const threads = await listAgentChatThreads({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      status: parsedStatus?.success ? parsedStatus.data : undefined,
+    });
+
+    return reply.send(ok(threads));
+  });
+
+  app.post("/agent-chats", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createAgentChatThreadInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const thread = await createAgentChatThread({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      createdByUserId: authContext.user.id,
+      title: parsed.data.title?.trim() || titleFromMessage(parsed.data.message ?? "New chat"),
+    });
+
+    let detail = await getAgentChatDetail({
+      threadId: thread.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+
+    if (parsed.data.message?.trim()) {
+      const learningContext = await queryLearningLibrary({
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+        query: parsed.data.message,
+        limit: 8,
+      });
+      const userMessage = await insertAgentChatMessage({
+        threadId: thread.id,
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+        role: "user",
+        content: parsed.data.message,
+        memoryContext: learningContext,
+      });
+      await indexLearningLibraryContent({
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+        sourceType: "chat_message",
+        sourceId: userMessage.id,
+        title: `Chat: ${thread.title}`,
+        summary: userMessage.content.slice(0, 180),
+        content: userMessage.content,
+        metadata: {
+          threadId: thread.id,
+          role: userMessage.role,
+        },
+        createdByUserId: authContext.user.id,
+      });
+
+      const integrations = getStore().organizationIntegrations.filter(
+        (integration) =>
+          integration.organizationId === authContext.organization.id &&
+          integration.status === "connected",
+      );
+      const replyResult = await generateChatReply({
+        message: parsed.data.message,
+        history: [],
+        learningContext,
+        integrations,
+      });
+      const assistantMessage = await insertAgentChatMessage({
+        threadId: thread.id,
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+        role: "assistant",
+        content: replyResult.answer,
+        memoryContext: learningContext,
+        metadata: {
+          citations: replyResult.citations,
+          plannerMode: replyResult.plannerMode,
+          modelProviderKey: replyResult.modelProviderKey,
+          modelName: replyResult.modelName,
+        },
+      });
+      await indexLearningLibraryContent({
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+        sourceType: "chat_message",
+        sourceId: assistantMessage.id,
+        title: `Chat: ${thread.title}`,
+        summary: assistantMessage.content.slice(0, 180),
+        content: assistantMessage.content,
+        metadata: {
+          threadId: thread.id,
+          role: assistantMessage.role,
+          citations: replyResult.citations,
+        },
+        createdByUserId: authContext.user.id,
+      });
+
+      detail = await getAgentChatDetail({
+        threadId: thread.id,
+        organizationId: authContext.organization.id,
+        workspaceId: authContext.workspace.id,
+      });
+    }
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "agent_chat.created",
+      entityType: "agent_chat_thread",
+      entityId: thread.id,
+      payload: {
+        title: thread.title,
+        seededWithMessage: Boolean(parsed.data.message?.trim()),
+      },
+    });
+
+    return reply.code(201).send(ok(detail ?? { thread, messages: [] }));
+  });
+
+  app.get("/agent-chats/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const detail = await getAgentChatDetail({
+      threadId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!detail) {
+      return reply.code(404).send(fail("id", "Chat thread not found.", "exists"));
+    }
+
+    return reply.send(ok(detail));
+  });
+
+  app.post("/agent-chats/:id/messages", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createAgentChatMessageInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const params = request.params as { id: string };
+    const detail = await getAgentChatDetail({
+      threadId: params.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!detail) {
+      return reply.code(404).send(fail("id", "Chat thread not found.", "exists"));
+    }
+
+    const learningContext = await queryLearningLibrary({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      query: parsed.data.message,
+      limit: 8,
+    });
+    const userMessage = await insertAgentChatMessage({
+      threadId: detail.thread.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      role: "user",
+      content: parsed.data.message,
+      memoryContext: learningContext,
+    });
+    await indexLearningLibraryContent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: "chat_message",
+      sourceId: userMessage.id,
+      title: `Chat: ${detail.thread.title}`,
+      summary: userMessage.content.slice(0, 180),
+      content: userMessage.content,
+      metadata: {
+        threadId: detail.thread.id,
+        role: userMessage.role,
+      },
+      createdByUserId: authContext.user.id,
+    });
+
+    const integrations = getStore().organizationIntegrations.filter(
+      (integration) =>
+        integration.organizationId === authContext.organization.id &&
+        integration.status === "connected",
+    );
+    const replyResult = await generateChatReply({
+      message: parsed.data.message,
+      history: detail.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      learningContext,
+      integrations,
+    });
+    const assistantMessage = await insertAgentChatMessage({
+      threadId: detail.thread.id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      role: "assistant",
+      content: replyResult.answer,
+      memoryContext: learningContext,
+      metadata: {
+        citations: replyResult.citations,
+        plannerMode: replyResult.plannerMode,
+        modelProviderKey: replyResult.modelProviderKey,
+        modelName: replyResult.modelName,
+      },
+    });
+    await indexLearningLibraryContent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: "chat_message",
+      sourceId: assistantMessage.id,
+      title: `Chat: ${detail.thread.title}`,
+      summary: assistantMessage.content.slice(0, 180),
+      content: assistantMessage.content,
+      metadata: {
+        threadId: detail.thread.id,
+        role: assistantMessage.role,
+        citations: replyResult.citations,
+      },
+      createdByUserId: authContext.user.id,
+    });
+
+    return reply.send(ok({ messages: [userMessage, assistantMessage] }));
+  });
+
+  app.post("/agent-chats/:id/archive", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const thread = await archiveAgentChatThread({
+      threadId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!thread) {
+      return reply.code(404).send(fail("id", "Chat thread not found.", "exists"));
+    }
+
+    return reply.send(ok(thread));
+  });
+
+  app.post("/agent-chats/:id/resume", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const thread = await resumeAgentChatThread({
+      threadId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!thread) {
+      return reply.code(404).send(fail("id", "Chat thread not found.", "exists"));
+    }
+
+    return reply.send(ok(thread));
+  });
+
+  app.get("/learning-library/sources", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const query = request.query as {
+      sourceType?: string;
+      status?: string;
+      search?: string;
+      limit?: string;
+      offset?: string;
+    };
+    const parsedSourceType = query.sourceType ? learningLibrarySourceTypeSchema.safeParse(query.sourceType) : null;
+    if (parsedSourceType && !parsedSourceType.success) {
+      return reply.code(422).send(fail("sourceType", "Invalid learning library source type."));
+    }
+    const parsedStatus = query.status ? learningLibraryStatusSchema.safeParse(query.status) : null;
+    if (parsedStatus && !parsedStatus.success) {
+      return reply.code(422).send(fail("status", "Invalid learning library status."));
+    }
+
+    const sources = await listLearningLibrarySources({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: parsedSourceType?.success ? parsedSourceType.data : undefined,
+      status: parsedStatus?.success ? parsedStatus.data : undefined,
+      search: query.search,
+      limit: query.limit ? Number(query.limit) : undefined,
+      offset: query.offset ? Number(query.offset) : undefined,
+    });
+
+    return reply.send(ok(sources));
+  });
+
+  app.post("/learning-library/sources", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = createLearningLibrarySourceInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const source = await indexLearningLibraryContent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: parsed.data.sourceType,
+      sourceId: parsed.data.sourceId,
+      title: parsed.data.title,
+      summary: parsed.data.summary ?? null,
+      content: parsed.data.content,
+      visibility: parsed.data.visibility,
+      metadata: parsed.data.metadata,
+      createdByUserId: authContext.user.id,
+    });
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "learning_library.source_indexed",
+      entityType: "learning_library_source",
+      entityId: source.id,
+      payload: {
+        sourceType: source.sourceType,
+        sourceId: source.sourceId,
+        status: source.status,
+      },
+    });
+
+    return reply.code(201).send(ok(source));
+  });
+
+  app.patch("/learning-library/sources/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = updateLearningLibrarySourceInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const source = await updateLearningLibrarySource({
+      sourceId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      title: parsed.data.title,
+      summary: parsed.data.summary,
+      visibility: parsed.data.visibility,
+      metadata: parsed.data.metadata,
+    });
+    if (!source) {
+      return reply.code(404).send(fail("id", "Learning library source not found.", "exists"));
+    }
+
+    return reply.send(ok(source));
+  });
+
+  app.delete("/learning-library/sources/:id", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const source = await deleteLearningLibrarySource({
+      sourceId: (request.params as { id: string }).id,
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+    });
+    if (!source) {
+      return reply.code(404).send(fail("id", "Learning library source not found.", "exists"));
+    }
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "learning_library.source_deleted",
+      entityType: "learning_library_source",
+      entityId: source.id,
+      payload: {
+        sourceType: source.sourceType,
+        sourceId: source.sourceId,
+      },
+    });
+
+    return reply.send(ok({ deleted: true }));
+  });
+
+  app.post("/learning-library/query", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = learningLibraryQueryInputSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const results = await queryLearningLibrary({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      query: parsed.data.query,
+      sourceTypes: parsed.data.sourceTypes,
+      limit: parsed.data.limit,
+    });
+
+    return reply.send(ok(results));
+  });
+
+  app.post("/learning-library/reindex", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = reindexLearningLibraryInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const result = await reindexLearningLibraryWorkspace({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: parsed.data.sourceType,
+      sourceId: parsed.data.sourceId,
+      limit: parsed.data.limit,
+      createdByUserId: authContext.user.id,
+    });
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "learning_library.reindexed",
+      entityType: "learning_library",
+      entityId: authContext.workspace.id,
+      payload: result,
+    });
+
+    return reply.send(ok(result));
+  });
+
+  app.post("/learning-library/purge", async (request, reply) => {
+    const authContext = await requireSession(request, reply);
+    if (!authContext) {
+      return;
+    }
+
+    const parsed = reindexLearningLibraryInputSchema.partial().safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(422).send(fail("body", parsed.error.issues[0]?.message ?? "Invalid payload"));
+    }
+
+    const result = await purgeLearningLibrary({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: parsed.data.sourceType,
+      sourceId: parsed.data.sourceId,
+    });
+
+    await insertAuditEvent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      userId: authContext.user.id,
+      eventType: "learning_library.purged",
+      entityType: "learning_library",
+      entityId: authContext.workspace.id,
+      payload: result,
+    });
+
+    return reply.send(ok(result));
+  });
+
   app.post("/program-files", async (request, reply) => {
     const authContext = await requireSession(request, reply);
     if (!authContext) {
@@ -2203,6 +3267,27 @@ export const registerRoutes = async (app: FastifyInstance) => {
     };
 
     getStore().programFiles.unshift(programFile);
+    await indexLearningLibraryContent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: "program_file",
+      sourceId: programFile.id,
+      title: programFile.name,
+      summary: programFile.description,
+      content: [
+        programFile.name,
+        programFile.description ?? "",
+        `Source type: ${programFile.sourceType}`,
+        programFile.tags.length ? `Tags: ${programFile.tags.join(", ")}` : "",
+        programFile.content,
+      ].filter(Boolean).join("\n\n"),
+      metadata: {
+        agentId: programFile.agentId,
+        sourceType: programFile.sourceType,
+        tags: programFile.tags,
+      },
+      createdByUserId: authContext.user.id,
+    });
     recordAuditEvent({
       organizationId: authContext.organization.id,
       workspaceId: authContext.workspace.id,
@@ -2276,6 +3361,27 @@ export const registerRoutes = async (app: FastifyInstance) => {
       programFile.tags = parsed.data.tags;
     }
     programFile.updatedAt = nowIso();
+    await indexLearningLibraryContent({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      sourceType: "program_file",
+      sourceId: programFile.id,
+      title: programFile.name,
+      summary: programFile.description,
+      content: [
+        programFile.name,
+        programFile.description ?? "",
+        `Source type: ${programFile.sourceType}`,
+        programFile.tags.length ? `Tags: ${programFile.tags.join(", ")}` : "",
+        programFile.content,
+      ].filter(Boolean).join("\n\n"),
+      metadata: {
+        agentId: programFile.agentId,
+        sourceType: programFile.sourceType,
+        tags: programFile.tags,
+      },
+      createdByUserId: authContext.user.id,
+    });
 
     recordAuditEvent({
       organizationId: authContext.organization.id,
@@ -2813,10 +3919,17 @@ export const registerRoutes = async (app: FastifyInstance) => {
     const toolGrants = getStore().toolGrants.filter(
       (grant) => grant.workspaceId === authContext.workspace.id,
     );
+    const learningContext = await queryLearningLibrary({
+      organizationId: authContext.organization.id,
+      workspaceId: authContext.workspace.id,
+      query: parsed.data.prompt ?? `${agent.displayName} ${agent.mission}`,
+      limit: 8,
+    });
     const planned = await planRun({
       agent,
       agents: workspaceAgents,
       prompt: parsed.data.prompt,
+      learningContext,
       integrations,
       toolGrants,
       userId: authContext.user.id,
@@ -2877,6 +3990,12 @@ export const registerRoutes = async (app: FastifyInstance) => {
           providerKey: planned.plan.modelProviderKey,
           modelName: planned.plan.modelName,
         },
+        learningLibraryMatches: learningContext.map((result) => ({
+          sourceId: result.source.id,
+          sourceType: result.source.sourceType,
+          title: result.source.title,
+          score: result.score,
+        })),
         orchestration: persistedRun.orchestration,
       },
     });
@@ -2887,6 +4006,7 @@ export const registerRoutes = async (app: FastifyInstance) => {
         steps,
         approvalRequest: null,
         plan: planned.plan,
+        learningContext,
       }),
     );
   });

@@ -23,6 +23,7 @@ export const appConfig = {
   appUrl: read("APP_URL", "http://localhost:3000"),
   webApiBaseUrl: read("WEB_API_BASE_URL", "http://localhost:4001"),
   sessionSecret: read("SESSION_SECRET", "change-me"),
+  credentialsEncryptionKey: readOptional("CREDENTIALS_ENCRYPTION_KEY"),
   databaseUrl: read("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/agent_marketplace"),
   redisUrl: read("REDIS_URL", "redis://localhost:6379"),
   temporalEnabled: read("TEMPORAL_ENABLED", "true") === "true",
@@ -45,6 +46,12 @@ export const appConfig = {
   slackRedirectUri: readOptional(
     "SLACK_REDIRECT_URI",
     "http://localhost:4001/organization-integrations/oauth/slack/callback",
+  ),
+  googleClientId: readOptional("GOOGLE_CLIENT_ID"),
+  googleClientSecret: readOptional("GOOGLE_CLIENT_SECRET"),
+  googleRedirectUri: readOptional(
+    "GOOGLE_REDIRECT_URI",
+    "http://localhost:4001/organization-integrations/oauth/google-workspace/callback",
   ),
   baseSepoliaRpcUrl: readOptional("BASE_SEPOLIA_RPC_URL"),
   basePublisherPrivateKey: readOptional("BASE_PUBLISHER_PRIVATE_KEY"),

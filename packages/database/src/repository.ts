@@ -2,8 +2,17 @@ import crypto from "node:crypto";
 import { appConfig } from "@agent-marketplace/config";
 import type {
   AgentSpec,
+  AgentChatMessage,
+  AgentChatThread,
+  AgentChatThreadStatus,
+  AgentChatMessageRole,
   ApprovalRequest,
   AuditEvent,
+  CreateWebsiteCredentialInput,
+  LearningLibraryQueryResult,
+  LearningLibrarySource,
+  LearningLibrarySourceType,
+  LearningLibraryVisibility,
   OrganizationIntegration,
   OrchestrationRef,
   ProgramFile,
@@ -11,6 +20,8 @@ import type {
   Run,
   RunStep,
   ToolGrant,
+  UpdateWebsiteCredentialInput,
+  WebsiteCredential,
 } from "@agent-marketplace/contracts";
 import { Pool, type PoolClient } from "pg";
 
@@ -20,6 +31,10 @@ const pool = new Pool({
 
 const nowIso = () => new Date().toISOString();
 const createId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+const credentialKey = crypto
+  .createHash("sha256")
+  .update(appConfig.credentialsEncryptionKey ?? appConfig.sessionSecret)
+  .digest();
 
 const toIsoString = (value: unknown) => {
   if (!value) {
@@ -39,6 +54,68 @@ const toRecord = (value: unknown) =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+
+const contentHash = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
+
+const chunkContent = (content: string, chunkSize = 2400, overlap = 240) => {
+  const normalized = content.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < normalized.length) {
+    const hardEnd = Math.min(cursor + chunkSize, normalized.length);
+    const softBreak = normalized.lastIndexOf("\n", hardEnd);
+    const end = softBreak > cursor + chunkSize * 0.6 ? softBreak : hardEnd;
+    const chunk = normalized.slice(cursor, end).trim();
+    if (chunk) {
+      chunks.push(chunk);
+    }
+    if (end >= normalized.length) {
+      break;
+    }
+    cursor = Math.max(0, end - overlap);
+  }
+
+  return chunks;
+};
+
+const encryptSecret = (value: string) => {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", credentialKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    ciphertext: ciphertext.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: authTag.toString("base64"),
+  };
+};
+
+const decryptSecret = ({
+  ciphertext,
+  iv,
+  authTag,
+}: {
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+}) => {
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    credentialKey,
+    Buffer.from(iv, "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(authTag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(ciphertext, "base64")),
+    decipher.final(),
+  ]);
+  return plaintext.toString("utf8");
+};
 
 const mapAgent = (row: Record<string, any>): AgentSpec => ({
   id: row.id,
@@ -74,6 +151,26 @@ const mapIntegration = (row: Record<string, any>): OrganizationIntegration => ({
   lastValidatedAt: toIsoString(row.last_validated_at),
 });
 
+const mapWebsiteCredential = (row: Record<string, any>): WebsiteCredential => ({
+  id: row.id,
+  organizationId: row.organization_id,
+  workspaceId: row.workspace_id,
+  label: row.label,
+  origin: row.origin,
+  loginUrl: row.login_url,
+  username: row.username,
+  usernameSelector: row.username_selector,
+  passwordSelector: row.password_selector,
+  submitSelector: row.submit_selector,
+  successSelector: row.success_selector,
+  notes: row.notes,
+  hasSecret: !!row.secret_ciphertext,
+  createdByUserId: row.created_by_user_id,
+  createdAt: toIsoString(row.created_at) ?? nowIso(),
+  updatedAt: toIsoString(row.updated_at) ?? nowIso(),
+  lastValidatedAt: toIsoString(row.last_validated_at),
+});
+
 const mapToolGrant = (row: Record<string, any>): ToolGrant => ({
   id: row.id,
   workspaceId: row.workspace_id,
@@ -98,6 +195,78 @@ const mapProgramFile = (row: Record<string, any>): ProgramFile => ({
   createdByUserId: row.created_by_user_id,
   createdAt: toIsoString(row.created_at) ?? nowIso(),
   updatedAt: toIsoString(row.updated_at) ?? nowIso(),
+});
+
+const mapLearningLibrarySource = (row: Record<string, any>): LearningLibrarySource => ({
+  id: row.id,
+  organizationId: row.organization_id,
+  workspaceId: row.workspace_id,
+  sourceType: row.source_type,
+  sourceId: row.source_id,
+  title: row.title,
+  summary: row.summary,
+  status: row.status,
+  visibility: row.visibility,
+  metadata: toRecord(row.metadata),
+  indexedAt: toIsoString(row.indexed_at),
+  indexError: row.index_error,
+  deletedAt: toIsoString(row.deleted_at),
+  createdByUserId: row.created_by_user_id,
+  createdAt: toIsoString(row.created_at) ?? nowIso(),
+  updatedAt: toIsoString(row.updated_at) ?? nowIso(),
+  chunkCount: row.chunk_count === undefined ? undefined : Number(row.chunk_count),
+});
+
+const mapLearningLibraryQueryResult = (row: Record<string, any>): LearningLibraryQueryResult => ({
+  source: mapLearningLibrarySource({
+    id: row.source_id,
+    organization_id: row.organization_id,
+    workspace_id: row.workspace_id,
+    source_type: row.source_type,
+    source_id: row.external_source_id,
+    title: row.title,
+    summary: row.summary,
+    status: row.status,
+    visibility: row.visibility,
+    metadata: row.source_metadata,
+    indexed_at: row.indexed_at,
+    index_error: row.index_error,
+    deleted_at: row.deleted_at,
+    created_by_user_id: row.created_by_user_id,
+    created_at: row.source_created_at,
+    updated_at: row.source_updated_at,
+  }),
+  chunkId: row.chunk_id,
+  chunkIndex: Number(row.chunk_index),
+  content: row.content,
+  score: Number(row.score ?? 0),
+  metadata: toRecord(row.chunk_metadata),
+});
+
+const mapAgentChatThread = (row: Record<string, any>): AgentChatThread => ({
+  id: row.id,
+  organizationId: row.organization_id,
+  workspaceId: row.workspace_id,
+  title: row.title,
+  status: row.status,
+  createdByUserId: row.created_by_user_id,
+  archivedAt: toIsoString(row.archived_at),
+  createdAt: toIsoString(row.created_at) ?? nowIso(),
+  updatedAt: toIsoString(row.updated_at) ?? nowIso(),
+  lastMessage: row.last_message === undefined ? undefined : row.last_message,
+  messageCount: row.message_count === undefined ? undefined : Number(row.message_count),
+});
+
+const mapAgentChatMessage = (row: Record<string, any>): AgentChatMessage => ({
+  id: row.id,
+  threadId: row.thread_id,
+  organizationId: row.organization_id,
+  workspaceId: row.workspace_id,
+  role: row.role,
+  content: row.content,
+  memoryContext: Array.isArray(row.memory_context) ? row.memory_context as LearningLibraryQueryResult[] : [],
+  metadata: toRecord(row.metadata),
+  createdAt: toIsoString(row.created_at) ?? nowIso(),
 });
 
 const mapPublication = (row: Record<string, any>): PublicationRecord => ({
@@ -226,6 +395,843 @@ export type PublicationExecutionContext = {
   integration: OrganizationIntegration | null;
 };
 
+export type WebsiteCredentialExecutionRecord = WebsiteCredential & {
+  password: string;
+};
+
+export type AgentChatDetail = {
+  thread: AgentChatThread;
+  messages: AgentChatMessage[];
+};
+
+export type LearningLibraryListOptions = {
+  organizationId: string;
+  workspaceId: string;
+  sourceType?: LearningLibrarySourceType;
+  status?: LearningLibrarySource["status"];
+  search?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type LearningLibraryIndexInput = {
+  organizationId: string;
+  workspaceId: string;
+  sourceType: LearningLibrarySourceType;
+  sourceId?: string;
+  title: string;
+  summary?: string | null;
+  content: string;
+  visibility?: LearningLibraryVisibility;
+  metadata?: Record<string, unknown>;
+  createdByUserId?: string | null;
+};
+
+const boundedLimit = (value: number | undefined, fallback: number, max: number) => {
+  const resolved = Number.isFinite(value) ? value : fallback;
+  return Math.max(1, Math.min(max, Math.trunc(resolved ?? fallback)));
+};
+
+export const listAgentChatThreads = async ({
+  organizationId,
+  workspaceId,
+  status,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  status?: AgentChatThreadStatus;
+}) => {
+  const result = await pool.query(
+    `select
+        t.*,
+        count(m.id)::int as message_count,
+        (
+          select content
+          from agent_chat_messages latest
+          where latest.thread_id = t.id
+          order by latest.created_at desc
+          limit 1
+        ) as last_message
+      from agent_chat_threads t
+      left join agent_chat_messages m on m.thread_id = t.id
+      where t.organization_id = $1
+        and t.workspace_id = $2
+        and ($3::text is null or t.status = $3)
+      group by t.id
+      order by t.updated_at desc, t.created_at desc`,
+    [organizationId, workspaceId, status ?? null],
+  );
+  return result.rows.map(mapAgentChatThread);
+};
+
+export const createAgentChatThread = async ({
+  organizationId,
+  workspaceId,
+  createdByUserId,
+  title,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  createdByUserId: string;
+  title: string;
+}) => {
+  const timestamp = nowIso();
+  const result = await pool.query(
+    `insert into agent_chat_threads (
+      id, organization_id, workspace_id, title, status, created_by_user_id,
+      archived_at, created_at, updated_at
+    ) values ($1,$2,$3,$4,'active',$5,null,$6,$6)
+    returning *`,
+    [
+      createId("chat_thread"),
+      organizationId,
+      workspaceId,
+      title.trim(),
+      createdByUserId,
+      timestamp,
+    ],
+  );
+  return mapAgentChatThread(result.rows[0]);
+};
+
+export const getAgentChatDetail = async ({
+  threadId,
+  organizationId,
+  workspaceId,
+}: {
+  threadId: string;
+  organizationId: string;
+  workspaceId: string;
+}): Promise<AgentChatDetail | null> => {
+  const [threadResult, messagesResult] = await Promise.all([
+    pool.query(
+      `select * from agent_chat_threads
+        where id = $1 and organization_id = $2 and workspace_id = $3
+        limit 1`,
+      [threadId, organizationId, workspaceId],
+    ),
+    pool.query(
+      `select * from agent_chat_messages
+        where thread_id = $1 and organization_id = $2 and workspace_id = $3
+        order by created_at asc`,
+      [threadId, organizationId, workspaceId],
+    ),
+  ]);
+  if (!threadResult.rows[0]) {
+    return null;
+  }
+
+  return {
+    thread: mapAgentChatThread(threadResult.rows[0]),
+    messages: messagesResult.rows.map(mapAgentChatMessage),
+  };
+};
+
+export const insertAgentChatMessage = async ({
+  threadId,
+  organizationId,
+  workspaceId,
+  role,
+  content,
+  memoryContext = [],
+  metadata = {},
+}: {
+  threadId: string;
+  organizationId: string;
+  workspaceId: string;
+  role: AgentChatMessageRole;
+  content: string;
+  memoryContext?: LearningLibraryQueryResult[];
+  metadata?: Record<string, unknown>;
+}) => {
+  const timestamp = nowIso();
+  const result = await withTransaction(async (client) => {
+    const messageResult = await client.query(
+      `insert into agent_chat_messages (
+        id, thread_id, organization_id, workspace_id, role, content, memory_context, metadata, created_at
+      ) values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9)
+      returning *`,
+      [
+        createId("chat_message"),
+        threadId,
+        organizationId,
+        workspaceId,
+        role,
+        content,
+        JSON.stringify(memoryContext),
+        JSON.stringify(metadata),
+        timestamp,
+      ],
+    );
+    await client.query(
+      `update agent_chat_threads
+        set updated_at = $2,
+            status = case when status = 'archived' then 'active' else status end,
+            archived_at = case when status = 'archived' then null else archived_at end
+        where id = $1 and organization_id = $3 and workspace_id = $4`,
+      [threadId, timestamp, organizationId, workspaceId],
+    );
+    return messageResult;
+  });
+
+  return mapAgentChatMessage(result.rows[0]);
+};
+
+export const archiveAgentChatThread = async ({
+  threadId,
+  organizationId,
+  workspaceId,
+}: {
+  threadId: string;
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const timestamp = nowIso();
+  const result = await pool.query(
+    `update agent_chat_threads
+      set status = 'archived',
+          archived_at = $4,
+          updated_at = $4
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      returning *`,
+    [threadId, organizationId, workspaceId, timestamp],
+  );
+  return result.rows[0] ? mapAgentChatThread(result.rows[0]) : null;
+};
+
+export const resumeAgentChatThread = async ({
+  threadId,
+  organizationId,
+  workspaceId,
+}: {
+  threadId: string;
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const timestamp = nowIso();
+  const result = await pool.query(
+    `update agent_chat_threads
+      set status = 'active',
+          archived_at = null,
+          updated_at = $4
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      returning *`,
+    [threadId, organizationId, workspaceId, timestamp],
+  );
+  return result.rows[0] ? mapAgentChatThread(result.rows[0]) : null;
+};
+
+export const listLearningLibrarySources = async ({
+  organizationId,
+  workspaceId,
+  sourceType,
+  status,
+  search,
+  limit,
+  offset,
+}: LearningLibraryListOptions) => {
+  const result = await pool.query(
+    `select s.*, count(c.id)::int as chunk_count
+      from learning_library_sources s
+      left join learning_library_chunks c on c.source_id = s.id
+      where s.organization_id = $1
+        and s.workspace_id = $2
+        and s.deleted_at is null
+        and ($3::text is null or s.source_type = $3)
+        and ($4::text is null or s.status = $4)
+        and (
+          $5::text is null
+          or s.title ilike '%' || $5 || '%'
+          or coalesce(s.summary, '') ilike '%' || $5 || '%'
+        )
+      group by s.id
+      order by s.updated_at desc, s.created_at desc
+      limit $6 offset $7`,
+    [
+      organizationId,
+      workspaceId,
+      sourceType ?? null,
+      status ?? null,
+      search?.trim() || null,
+      boundedLimit(limit, 50, 200),
+      Number.isFinite(offset) ? Math.max(0, Math.trunc(offset ?? 0)) : 0,
+    ],
+  );
+  return result.rows.map(mapLearningLibrarySource);
+};
+
+export const indexLearningLibraryContent = async ({
+  organizationId,
+  workspaceId,
+  sourceType,
+  sourceId,
+  title,
+  summary = null,
+  content,
+  visibility = "workspace",
+  metadata = {},
+  createdByUserId = null,
+}: LearningLibraryIndexInput) => {
+  const chunks = chunkContent(content);
+  const librarySourceId = createId("library_source");
+  const resolvedSourceId = sourceId?.trim() || librarySourceId;
+  const timestamp = nowIso();
+
+  return withTransaction(async (client) => {
+    const sourceResult = await client.query(
+      `insert into learning_library_sources (
+        id, organization_id, workspace_id, source_type, source_id, title, summary, status,
+        visibility, metadata, indexed_at, index_error, deleted_at, created_by_user_id, created_at, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9::jsonb,null,null,null,$10,$11,$11)
+      on conflict (workspace_id, source_type, source_id) do update set
+        organization_id = excluded.organization_id,
+        title = excluded.title,
+        summary = excluded.summary,
+        status = 'pending',
+        visibility = excluded.visibility,
+        metadata = excluded.metadata,
+        index_error = null,
+        deleted_at = null,
+        updated_at = excluded.updated_at
+      returning *`,
+      [
+        librarySourceId,
+        organizationId,
+        workspaceId,
+        sourceType,
+        resolvedSourceId,
+        title.trim(),
+        summary?.trim() || null,
+        visibility,
+        JSON.stringify(metadata),
+        createdByUserId,
+        timestamp,
+      ],
+    );
+    const source = mapLearningLibrarySource(sourceResult.rows[0]);
+
+    await client.query("delete from learning_library_chunks where source_id = $1", [source.id]);
+
+    if (!chunks.length) {
+      const failedResult = await client.query(
+        `update learning_library_sources
+          set status = 'failed',
+              indexed_at = null,
+              index_error = 'No indexable content was provided.',
+              updated_at = $2
+          where id = $1
+          returning *`,
+        [source.id, nowIso()],
+      );
+      return mapLearningLibrarySource(failedResult.rows[0]);
+    }
+
+    for (const [index, chunk] of chunks.entries()) {
+      await client.query(
+        `insert into learning_library_chunks (
+          id, source_id, organization_id, workspace_id, chunk_index, content,
+          content_hash, metadata, created_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+        on conflict (source_id, content_hash) do nothing`,
+        [
+          createId("library_chunk"),
+          source.id,
+          organizationId,
+          workspaceId,
+          index,
+          chunk,
+          contentHash(chunk),
+          JSON.stringify({ sourceType, sourceId: resolvedSourceId }),
+          nowIso(),
+        ],
+      );
+    }
+
+    const indexedResult = await client.query(
+      `update learning_library_sources
+        set status = 'indexed',
+            indexed_at = $2,
+            index_error = null,
+            updated_at = $2
+        where id = $1
+        returning *`,
+      [source.id, nowIso()],
+    );
+    return mapLearningLibrarySource({ ...indexedResult.rows[0], chunk_count: chunks.length });
+  });
+};
+
+export const updateLearningLibrarySource = async ({
+  sourceId,
+  organizationId,
+  workspaceId,
+  title,
+  summary,
+  visibility,
+  metadata,
+}: {
+  sourceId: string;
+  organizationId: string;
+  workspaceId: string;
+  title?: string;
+  summary?: string | null;
+  visibility?: LearningLibraryVisibility;
+  metadata?: Record<string, unknown>;
+}) => {
+  const result = await pool.query(
+    `update learning_library_sources
+      set title = coalesce($4, title),
+          summary = case when $5::boolean then $6 else summary end,
+          visibility = coalesce($7, visibility),
+          metadata = coalesce($8::jsonb, metadata),
+          updated_at = $9
+      where id = $1 and organization_id = $2 and workspace_id = $3 and deleted_at is null
+      returning *`,
+    [
+      sourceId,
+      organizationId,
+      workspaceId,
+      title?.trim() || null,
+      summary !== undefined,
+      summary?.trim() || null,
+      visibility ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+      nowIso(),
+    ],
+  );
+  return result.rows[0] ? mapLearningLibrarySource(result.rows[0]) : null;
+};
+
+export const deleteLearningLibrarySource = async ({
+  sourceId,
+  organizationId,
+  workspaceId,
+}: {
+  sourceId: string;
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const result = await pool.query(
+    `delete from learning_library_sources
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      returning *`,
+    [sourceId, organizationId, workspaceId],
+  );
+  return result.rows[0] ? mapLearningLibrarySource(result.rows[0]) : null;
+};
+
+export const purgeLearningLibrary = async ({
+  organizationId,
+  workspaceId,
+  sourceType,
+  sourceId,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  sourceType?: LearningLibrarySourceType;
+  sourceId?: string;
+}) => {
+  const result = await pool.query(
+    `delete from learning_library_sources
+      where organization_id = $1
+        and workspace_id = $2
+        and ($3::text is null or source_type = $3)
+        and ($4::text is null or source_id = $4)`,
+    [organizationId, workspaceId, sourceType ?? null, sourceId ?? null],
+  );
+  return { deletedCount: result.rowCount ?? 0 };
+};
+
+export const queryLearningLibrary = async ({
+  organizationId,
+  workspaceId,
+  query,
+  sourceTypes,
+  limit,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  query: string;
+  sourceTypes?: LearningLibrarySourceType[];
+  limit?: number;
+}) => {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const result = await pool.query(
+    `with search as (
+        select websearch_to_tsquery('english', $3) as ts_query
+      )
+      select
+        s.id as source_id,
+        s.organization_id,
+        s.workspace_id,
+        s.source_type,
+        s.source_id as external_source_id,
+        s.title,
+        s.summary,
+        s.status,
+        s.visibility,
+        s.metadata as source_metadata,
+        s.indexed_at,
+        s.index_error,
+        s.deleted_at,
+        s.created_by_user_id,
+        s.created_at as source_created_at,
+        s.updated_at as source_updated_at,
+        c.id as chunk_id,
+        c.chunk_index,
+        c.content,
+        c.metadata as chunk_metadata,
+        greatest(
+          ts_rank_cd(c.search_vector, search.ts_query),
+          case when c.content ilike '%' || $3 || '%' then 0.05 else 0 end
+        ) as score
+      from learning_library_chunks c
+      join learning_library_sources s on s.id = c.source_id
+      cross join search
+      where s.organization_id = $1
+        and s.workspace_id = $2
+        and s.status = 'indexed'
+        and s.deleted_at is null
+        and ($4::text[] is null or s.source_type = any($4::text[]))
+        and (
+          c.search_vector @@ search.ts_query
+          or c.content ilike '%' || $3 || '%'
+          or s.title ilike '%' || $3 || '%'
+          or coalesce(s.summary, '') ilike '%' || $3 || '%'
+        )
+      order by score desc, s.updated_at desc, c.chunk_index asc
+      limit $5`,
+    [
+      organizationId,
+      workspaceId,
+      normalizedQuery,
+      sourceTypes?.length ? sourceTypes : null,
+      boundedLimit(limit, 8, 20),
+    ],
+  );
+
+  return result.rows.map(mapLearningLibraryQueryResult);
+};
+
+export const indexProgramFileInLearningLibrary = async ({
+  programFileId,
+  organizationId,
+  workspaceId,
+  createdByUserId,
+}: {
+  programFileId: string;
+  organizationId: string;
+  workspaceId: string;
+  createdByUserId?: string | null;
+}) => {
+  const programFile = await getProgramFileById({ programFileId, workspaceId });
+  if (!programFile || programFile.organizationId !== organizationId) {
+    return null;
+  }
+
+  return indexLearningLibraryContent({
+    organizationId,
+    workspaceId,
+    sourceType: "program_file",
+    sourceId: programFile.id,
+    title: programFile.name,
+    summary: programFile.description,
+    content: [
+      programFile.name,
+      programFile.description ?? "",
+      `Source type: ${programFile.sourceType}`,
+      programFile.tags.length ? `Tags: ${programFile.tags.join(", ")}` : "",
+      programFile.content,
+    ].filter(Boolean).join("\n\n"),
+    metadata: {
+      agentId: programFile.agentId,
+      sourceType: programFile.sourceType,
+      tags: programFile.tags,
+    },
+    createdByUserId,
+  });
+};
+
+export const indexRunInLearningLibrary = async ({
+  runId,
+  organizationId,
+  workspaceId,
+  createdByUserId,
+}: {
+  runId: string;
+  organizationId: string;
+  workspaceId: string;
+  createdByUserId?: string | null;
+}) => {
+  const detail = await getRunDetail({ runId, workspaceId });
+  if (!detail || detail.run.organizationId !== organizationId) {
+    return null;
+  }
+
+  const content = [
+    `Run summary: ${detail.run.summary}`,
+    `Status: ${detail.run.status}`,
+    detail.run.plannedActions.length ? `Planned actions:\n${detail.run.plannedActions.map((action) => `- ${action}`).join("\n")}` : "",
+    detail.steps
+      .filter((step) => step.output)
+      .map((step) => `${step.title}\n${step.output}`)
+      .join("\n\n"),
+  ].filter(Boolean).join("\n\n");
+
+  return indexLearningLibraryContent({
+    organizationId,
+    workspaceId,
+    sourceType: "agent_run",
+    sourceId: detail.run.id,
+    title: `Run ${detail.run.id}`,
+    summary: detail.run.summary,
+    content,
+    metadata: {
+      agentId: detail.run.agentId,
+      status: detail.run.status,
+    },
+    createdByUserId,
+  });
+};
+
+export const reindexLearningLibraryWorkspace = async ({
+  organizationId,
+  workspaceId,
+  sourceType,
+  sourceId,
+  limit,
+  createdByUserId,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  sourceType?: LearningLibrarySourceType;
+  sourceId?: string;
+  limit?: number;
+  createdByUserId?: string | null;
+}) => {
+  const max = boundedLimit(limit, 100, 500);
+  let indexedCount = 0;
+  let failedCount = 0;
+
+  if (!sourceType || sourceType === "program_file") {
+    const result = await pool.query(
+      `select id from program_files
+        where organization_id = $1 and workspace_id = $2 and ($3::text is null or id = $3)
+        order by updated_at desc
+        limit $4`,
+      [organizationId, workspaceId, sourceId ?? null, max],
+    );
+    for (const row of result.rows) {
+      const indexed = await indexProgramFileInLearningLibrary({
+        programFileId: row.id,
+        organizationId,
+        workspaceId,
+        createdByUserId,
+      });
+      indexed ? indexedCount += 1 : failedCount += 1;
+    }
+  }
+
+  if (!sourceType || sourceType === "agent_run") {
+    const result = await pool.query(
+      `select id from runs
+        where organization_id = $1
+          and workspace_id = $2
+          and status in ('completed', 'failed', 'cancelled')
+          and ($3::text is null or id = $3)
+        order by updated_at desc
+        limit $4`,
+      [organizationId, workspaceId, sourceId ?? null, max],
+    );
+    for (const row of result.rows) {
+      const indexed = await indexRunInLearningLibrary({
+        runId: row.id,
+        organizationId,
+        workspaceId,
+        createdByUserId,
+      });
+      indexed ? indexedCount += 1 : failedCount += 1;
+    }
+  }
+
+  return { indexedCount, failedCount };
+};
+
+export const listWebsiteCredentialsByWorkspace = async ({
+  organizationId,
+  workspaceId,
+}: {
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const result = await pool.query(
+    `select * from website_credentials
+      where organization_id = $1 and workspace_id = $2
+      order by updated_at desc, created_at desc`,
+    [organizationId, workspaceId],
+  );
+  return result.rows.map(mapWebsiteCredential);
+};
+
+export const createWebsiteCredential = async ({
+  organizationId,
+  workspaceId,
+  createdByUserId,
+  input,
+}: {
+  organizationId: string;
+  workspaceId: string;
+  createdByUserId: string;
+  input: CreateWebsiteCredentialInput;
+}) => {
+  const id = createId("credential");
+  const createdAt = nowIso();
+  const encrypted = encryptSecret(input.password);
+  const result = await pool.query(
+    `insert into website_credentials (
+      id, organization_id, workspace_id, label, origin, login_url, username,
+      secret_ciphertext, secret_iv, secret_auth_tag, username_selector, password_selector,
+      submit_selector, success_selector, notes, created_by_user_id, created_at, updated_at, last_validated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,null)
+    returning *`,
+    [
+      id,
+      organizationId,
+      workspaceId,
+      input.label.trim(),
+      input.origin.trim(),
+      input.loginUrl.trim(),
+      input.username.trim(),
+      encrypted.ciphertext,
+      encrypted.iv,
+      encrypted.authTag,
+      input.usernameSelector.trim(),
+      input.passwordSelector.trim(),
+      input.submitSelector?.trim() || null,
+      input.successSelector?.trim() || null,
+      input.notes?.trim() || null,
+      createdByUserId,
+      createdAt,
+      createdAt,
+    ],
+  );
+  return mapWebsiteCredential(result.rows[0]);
+};
+
+export const updateWebsiteCredential = async ({
+  credentialId,
+  organizationId,
+  workspaceId,
+  input,
+}: {
+  credentialId: string;
+  organizationId: string;
+  workspaceId: string;
+  input: UpdateWebsiteCredentialInput;
+}) => {
+  const existingResult = await pool.query(
+    `select * from website_credentials
+      where id = $1 and organization_id = $2 and workspace_id = $3`,
+    [credentialId, organizationId, workspaceId],
+  );
+  const existingRow = existingResult.rows[0];
+  if (!existingRow) {
+    return null;
+  }
+
+  const encrypted = input.password ? encryptSecret(input.password) : null;
+  const updatedAt = nowIso();
+  const result = await pool.query(
+    `update website_credentials
+      set label = $4,
+          origin = $5,
+          login_url = $6,
+          username = $7,
+          secret_ciphertext = $8,
+          secret_iv = $9,
+          secret_auth_tag = $10,
+          username_selector = $11,
+          password_selector = $12,
+          submit_selector = $13,
+          success_selector = $14,
+          notes = $15,
+          updated_at = $16
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      returning *`,
+    [
+      credentialId,
+      organizationId,
+      workspaceId,
+      input.label?.trim() ?? existingRow.label,
+      input.origin?.trim() ?? existingRow.origin,
+      input.loginUrl?.trim() ?? existingRow.login_url,
+      input.username?.trim() ?? existingRow.username,
+      encrypted?.ciphertext ?? existingRow.secret_ciphertext,
+      encrypted?.iv ?? existingRow.secret_iv,
+      encrypted?.authTag ?? existingRow.secret_auth_tag,
+      input.usernameSelector?.trim() ?? existingRow.username_selector,
+      input.passwordSelector?.trim() ?? existingRow.password_selector,
+      input.submitSelector === undefined ? existingRow.submit_selector : input.submitSelector?.trim() || null,
+      input.successSelector === undefined ? existingRow.success_selector : input.successSelector?.trim() || null,
+      input.notes === undefined ? existingRow.notes : input.notes?.trim() || null,
+      updatedAt,
+    ],
+  );
+  return result.rows[0] ? mapWebsiteCredential(result.rows[0]) : null;
+};
+
+export const deleteWebsiteCredential = async ({
+  credentialId,
+  organizationId,
+  workspaceId,
+}: {
+  credentialId: string;
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const result = await pool.query(
+    `delete from website_credentials
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      returning *`,
+    [credentialId, organizationId, workspaceId],
+  );
+  return result.rows[0] ? mapWebsiteCredential(result.rows[0]) : null;
+};
+
+export const getWebsiteCredentialForExecution = async ({
+  credentialId,
+  organizationId,
+  workspaceId,
+}: {
+  credentialId: string;
+  organizationId: string;
+  workspaceId: string;
+}) => {
+  const result = await pool.query(
+    `select * from website_credentials
+      where id = $1 and organization_id = $2 and workspace_id = $3
+      limit 1`,
+    [credentialId, organizationId, workspaceId],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    ...mapWebsiteCredential(row),
+    password: decryptSecret({
+      ciphertext: row.secret_ciphertext,
+      iv: row.secret_iv,
+      authTag: row.secret_auth_tag,
+    }),
+  } satisfies WebsiteCredentialExecutionRecord;
+};
+
 export const insertRunGraph = async ({
   run,
   steps,
@@ -315,7 +1321,7 @@ export const listRunsByWorkspace = async (workspaceId: string): Promise<RunListI
     pool.query("select * from approval_requests where workspace_id = $1 order by created_at desc", [workspaceId]),
   ]);
 
-  const agents = new Map(agentsResult.rows.map((row) => {
+  const agents = new Map(agentsResult.rows.map((row: Record<string, any>) => {
     const agent = mapAgent(row);
     return [agent.id, agent] as const;
   }));
@@ -327,7 +1333,7 @@ export const listRunsByWorkspace = async (workspaceId: string): Promise<RunListI
     }
   }
 
-  return runsResult.rows.map((row) => {
+  return runsResult.rows.map((row: Record<string, any>) => {
     const run = mapRun(row);
     return {
       ...run,
@@ -356,7 +1362,7 @@ export const getRunDetail = async ({
   ]);
 
   const approvalRequest =
-    approvalsResult.rows.map(mapApproval).find((approval) => approval.status === "pending") ?? null;
+    approvalsResult.rows.map(mapApproval).find((approval: ApprovalRequest) => approval.status === "pending") ?? null;
 
   return {
     run: mapRun(row),
@@ -770,7 +1776,7 @@ export const getPublicationExecutionContext = async (publicationId: string): Pro
   const [programFile, integration] = await Promise.all([
     getProgramFileById({ programFileId: publication.programFileId }),
     publication.organizationIntegrationId
-      ? pool.query("select * from organization_integrations where id = $1", [publication.organizationIntegrationId]).then((result) =>
+      ? pool.query("select * from organization_integrations where id = $1", [publication.organizationIntegrationId]).then((result: { rows: Record<string, any>[] }) =>
           result.rows[0] ? mapIntegration(result.rows[0]) : null,
         )
       : Promise.resolve(null),

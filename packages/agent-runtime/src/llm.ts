@@ -2,6 +2,7 @@ import {
   draftGenerationResultSchema,
   runPlanSchema,
   type DraftGenerationResult,
+  type LearningLibraryQueryResult,
   type ModelProviderKey,
   type OrganizationIntegration,
   type RunPlan,
@@ -206,6 +207,28 @@ const draftGenerationJsonSchema = {
     },
     modelName: {
       anyOf: [{ type: "string" }, { type: "null" }],
+    },
+  },
+} as const;
+
+const chatReplyJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["answer", "citations"],
+  properties: {
+    answer: { type: "string" },
+    citations: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sourceId", "title", "sourceType"],
+        properties: {
+          sourceId: { type: "string" },
+          title: { type: "string" },
+          sourceType: { type: "string" },
+        },
+      },
     },
   },
 } as const;
@@ -679,6 +702,7 @@ export const generateDraftsWithModel = async ({
 export const generateRunPlanWithModel = async ({
   mission,
   prompt,
+  learningContext = [],
   agents,
   executableTools,
   missingGrantTools,
@@ -686,6 +710,7 @@ export const generateRunPlanWithModel = async ({
 }: {
   mission: string;
   prompt?: string;
+  learningContext?: LearningLibraryQueryResult[];
   agents: Array<{
     id: string;
     displayName: string;
@@ -706,6 +731,16 @@ export const generateRunPlanWithModel = async ({
   const userPrompt = [
     `Agent mission:\n${mission}`,
     `Operator prompt:\n${prompt ?? "Use the latest agent context and workspace brief."}`,
+    `Learning library context:\n${
+      learningContext.length
+        ? learningContext
+            .map((result, index) => {
+              const excerpt = result.content.length > 900 ? `${result.content.slice(0, 900)}...` : result.content;
+              return `${index + 1}. ${result.source.title} [${result.source.sourceType}] score=${result.score.toFixed(4)}\n${excerpt}`;
+            })
+            .join("\n\n")
+        : "No matching indexed memory was found."
+    }`,
     `Available agents:\n${agents
       .map((agent) => `- ${agent.id}: ${agent.displayName} | mission=${agent.mission} | tools=${agent.allowedTools.join(", ") || "none"}`)
       .join("\n") || "None"}`,
@@ -742,6 +777,80 @@ export const generateRunPlanWithModel = async ({
     return {
       ...parsed.data,
       plannerMode: "llm",
+      modelProviderKey: planner.providerKey,
+      modelName: planner.modelName,
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const generateChatReplyWithModel = async ({
+  message,
+  history,
+  learningContext = [],
+  integrations,
+}: {
+  message: string;
+  history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  learningContext?: LearningLibraryQueryResult[];
+  integrations: OrganizationIntegration[];
+}): Promise<{
+  answer: string;
+  citations: Array<{ sourceId: string; title: string; sourceType: string }>;
+  modelProviderKey: ModelProviderKey;
+  modelName: string;
+} | null> => {
+  const planner = selectPlannerModelIntegration(integrations);
+  if (!planner) {
+    return null;
+  }
+
+  const systemPrompt =
+    "You are the Agent Marketplace chat assistant. Answer directly using conversation history and learning library excerpts. Do not claim access to systems unless the provided context proves it. If context is insufficient, say what is missing.";
+  const userPrompt = [
+    `Latest user message:\n${message}`,
+    `Conversation history:\n${
+      history.length
+        ? history.slice(-12).map((entry) => `${entry.role}: ${entry.content}`).join("\n\n")
+        : "No previous messages."
+    }`,
+    `Learning library context:\n${
+      learningContext.length
+        ? learningContext
+            .map((result, index) => {
+              const excerpt = result.content.length > 1200 ? `${result.content.slice(0, 1200)}...` : result.content;
+              return `${index + 1}. ${result.source.title} [${result.source.sourceType}] sourceId=${result.source.id}\n${excerpt}`;
+            })
+            .join("\n\n")
+        : "No matching indexed memory was found."
+    }`,
+    "Return JSON with answer and citations. Citations should reference only learning library sources actually used.",
+  ].join("\n\n");
+
+  try {
+    const payload = await callStructuredModel({
+      planner,
+      schemaName: "agent_chat_reply",
+      schema: chatReplyJsonSchema as unknown as Record<string, unknown>,
+      systemPrompt,
+      userPrompt,
+    });
+
+    if (!isRecord(payload) || typeof payload.answer !== "string" || !Array.isArray(payload.citations)) {
+      throw new Error("Chat reply JSON did not validate.");
+    }
+
+    return {
+      answer: payload.answer,
+      citations: payload.citations
+        .filter((citation): citation is Record<string, unknown> => isRecord(citation))
+        .map((citation) => ({
+          sourceId: typeof citation.sourceId === "string" ? citation.sourceId : "",
+          title: typeof citation.title === "string" ? citation.title : "",
+          sourceType: typeof citation.sourceType === "string" ? citation.sourceType : "",
+        }))
+        .filter((citation) => citation.sourceId && citation.title && citation.sourceType),
       modelProviderKey: planner.providerKey,
       modelName: planner.modelName,
     };

@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import {
   findIntegrationProvider,
   findIntegrationToolDefinitions,
-} from "@agent-marketplace/integrations";
+} from "@agent-marketplace/integrations/catalog";
 import { ProviderConnectionFlow } from "../../../../../components/provider-connection-flow";
 
 export default async function ProviderConnectionPage({

@@ -8,8 +8,11 @@ import { ThemeToggle } from "./theme-toggle";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", shortLabel: "DB" },
+  { href: "/chat", label: "Chat", shortLabel: "CH" },
   { href: "/agents", label: "Agents", shortLabel: "AG" },
   { href: "/integrations", label: "Integrations", shortLabel: "IN" },
+  { href: "/credentials", label: "Credentials", shortLabel: "CR" },
+  { href: "/learning-library", label: "Learning Library", shortLabel: "LL" },
   { href: "/publishing", label: "Durability", shortLabel: "DU" },
   { href: "/approvals", label: "Approvals", shortLabel: "AP" },
   { href: "/runs", label: "Runs", shortLabel: "RN" },

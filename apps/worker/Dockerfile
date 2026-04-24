@@ -10,5 +10,6 @@ RUN corepack enable
 COPY . .
 
 RUN pnpm install
+RUN pnpm --filter @agent-marketplace/integrations exec playwright install --with-deps chromium
 
 CMD ["pnpm", "--filter", "@agent-marketplace/worker", "dev"]

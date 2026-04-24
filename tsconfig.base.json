@@ -19,6 +19,12 @@
       "@agent-marketplace/integrations": [
         "packages/integrations/src/index.ts"
       ],
+      "@agent-marketplace/integrations/catalog": [
+        "packages/integrations/src/catalog.ts"
+      ],
+      "@agent-marketplace/integrations/definitions": [
+        "packages/integrations/src/definitions.ts"
+      ],
       "@agent-marketplace/agent-runtime": [
         "packages/agent-runtime/src/index.ts"
       ],

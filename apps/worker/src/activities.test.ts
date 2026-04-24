@@ -13,6 +13,7 @@ const mockDb = vi.hoisted(() => ({
   failRunStep: vi.fn(),
   getPublicationExecutionContext: vi.fn(),
   getRunExecutionContext: vi.fn(),
+  getWebsiteCredentialForExecution: vi.fn(),
   insertAuditEvent: vi.fn(),
   markRunStepStarted: vi.fn(),
   updateRunStatus: vi.fn(),
@@ -234,5 +235,123 @@ describe("advanceRunExecution", () => {
       }),
     );
     expect(mockDb.completeRun).not.toHaveBeenCalled();
+  });
+
+  it("resolves a saved website credential before executing browser steps", async () => {
+    mockDb.getRunExecutionContext.mockResolvedValue({
+      ...baseContext,
+      steps: [
+        {
+          ...baseContext.steps[0],
+          id: "browser-step",
+          title: "Visit billing portal",
+          tool: "browser.visit",
+          inputSnapshot: {
+            url: "https://billing.example.com/dashboard",
+            credentialId: "credential-1",
+          },
+          metadata: {
+            planStep: {
+              id: "step-browser",
+              title: "Visit billing portal",
+              objective: "Inspect the billing dashboard.",
+              tool: "browser.visit",
+              assignedAgentId: "agent-1",
+              arguments: {
+                url: "https://billing.example.com/dashboard",
+                credentialId: "credential-1",
+              },
+              approvalPreview: null,
+              handoffSummary: "Browser operator captures the portal state.",
+              dependsOn: [],
+              requiresApproval: false,
+              kind: "tool_call",
+            },
+          },
+        },
+      ],
+      approvals: [],
+      integrations: [
+        {
+          id: "integration-browser",
+          organizationId: "org-1",
+          providerKey: "playwright-browser",
+          displayName: "Playwright Browser",
+          status: "connected",
+          authType: "credentials",
+          scopes: ["browser.visit"],
+          metadata: {},
+          createdByUserId: "user-1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          lastValidatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      toolGrants: [
+        {
+          id: "grant-browser",
+          workspaceId: "workspace-1",
+          agentId: "agent-1",
+          organizationIntegrationId: "integration-browser",
+          providerKey: "playwright-browser",
+          tools: ["browser.visit"],
+          createdByUserId: "user-1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    mockDb.getWebsiteCredentialForExecution.mockResolvedValue({
+      id: "credential-1",
+      organizationId: "org-1",
+      workspaceId: "workspace-1",
+      label: "Billing portal",
+      origin: "https://billing.example.com",
+      loginUrl: "https://billing.example.com/login",
+      username: "agent@example.com",
+      password: "secret",
+      usernameSelector: "#email",
+      passwordSelector: "#password",
+      submitSelector: "button[type='submit']",
+      successSelector: "#dashboard",
+      notes: null,
+      hasSecret: true,
+      createdByUserId: "user-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      lastValidatedAt: null,
+    });
+    mockIntegrations.findToolExecutionAdapter.mockReturnValue({
+      execute: vi.fn().mockResolvedValue({
+        output: "Billing portal summary",
+        receipt: {
+          providerKey: "playwright-browser",
+          tool: "browser.visit",
+          summary: "Visited billing portal",
+          data: {
+            authenticated: true,
+          },
+        },
+      }),
+    });
+
+    const result = await advanceRunExecution({ runId: "run-1" });
+
+    expect(result.status).toBe("running");
+    expect(mockDb.getWebsiteCredentialForExecution).toHaveBeenCalledWith({
+      credentialId: "credential-1",
+      organizationId: "org-1",
+      workspaceId: "workspace-1",
+    });
+    expect(mockIntegrations.findToolExecutionAdapter).toHaveBeenCalledWith("browser.visit");
+    const adapter = mockIntegrations.findToolExecutionAdapter.mock.results[0]?.value;
+    expect(adapter.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtime: expect.objectContaining({
+          websiteCredential: expect.objectContaining({
+            id: "credential-1",
+          }),
+        }),
+      }),
+    );
   });
 });

@@ -5,6 +5,7 @@ import type {
   ApprovalPreview,
   ApprovalRequirement,
   DraftGenerationResult,
+  LearningLibraryQueryResult,
   OrganizationIntegration,
   ProgramFile,
   PublicationRecord,
@@ -18,6 +19,7 @@ import type {
 import { writeScopedTools } from "@agent-marketplace/integrations";
 import {
   generateDraftsWithModel,
+  generateChatReplyWithModel,
   generateRunPlanWithModel,
   testPlannerModelIntegration,
 } from "./llm";
@@ -30,7 +32,19 @@ const slugify = (value: string) =>
 
 const nowIso = () => new Date().toISOString();
 const isReadOnlyTool = (tool: string) =>
-  tool.includes(".read") || tool === "http.get" || tool.includes(".search");
+  tool.includes(".read") ||
+  tool === "http.get" ||
+  tool === "browser.visit" ||
+  tool === "browser.download" ||
+  tool.includes(".search");
+
+const findFirstUrl = (value?: string) => {
+  if (!value) {
+    return null;
+  }
+  const match = value.match(/https?:\/\/[^\s)]+/i);
+  return match ? match[0] : null;
+};
 
 const buildStepArguments = ({
   tool,
@@ -65,10 +79,28 @@ const buildStepArguments = ({
       return {
         text: prompt ? `Operator update: ${prompt}` : "Operator update ready for approval.",
       };
+    case "gmail.send":
+      return {
+        to: "REQUIRED_AT_EXECUTION",
+        subject: prompt ? `Reminder: ${prompt.slice(0, 80)}` : "Reminder from your agent",
+        text: prompt
+          ? `This is an automated reminder related to: ${prompt}`
+          : "This is an automated reminder from your agent.",
+      };
     case "slack.thread":
       return {
         threadTs: "REQUIRED_AT_EXECUTION",
         text: prompt ? `Thread update: ${prompt}` : "Thread update ready for approval.",
+      };
+    case "browser.visit":
+      return {
+        url: findFirstUrl(prompt) ?? "REQUIRED_AT_EXECUTION",
+        waitForSelector: "[data-testid='app'], main, body",
+      };
+    case "browser.download":
+      return {
+        url: findFirstUrl(prompt) ?? "REQUIRED_AT_EXECUTION",
+        downloadSelector: "a[href$='.pdf'], button[data-download], a[download]",
       };
     default:
       return {};
@@ -90,6 +122,8 @@ const buildApprovalPreview = ({
   targetLabel:
     typeof args.channelId === "string"
       ? args.channelId
+      : typeof args.to === "string"
+        ? args.to
       : typeof args.path === "string"
         ? args.path
         : null,
@@ -170,6 +204,9 @@ const inferRoleSeeds = (brief: string) => {
   if (normalized.includes("research") || normalized.includes("brief")) {
     seeds.push("Research Analyst");
   }
+  if (normalized.includes("website") || normalized.includes("portal") || normalized.includes("bill")) {
+    seeds.push("Website Operator");
+  }
 
   return seeds.length ? seeds : ["Operations Agent", "Communications Agent"];
 };
@@ -188,6 +225,9 @@ const roleToTools = (role: string): string[] => {
   }
   if (normalized.includes("pipeline")) {
     return ["crm.contacts.read", "crm.tasks.write", "slack.post"];
+  }
+  if (normalized.includes("website") || normalized.includes("portal") || normalized.includes("bill")) {
+    return ["browser.visit", "browser.download", "gmail.send"];
   }
 
   return ["gmail.read", "slack.post", "http.get"];
@@ -267,6 +307,7 @@ const fallbackRunPlan = ({
   supervisor,
   agents,
   prompt,
+  learningContext,
   executableTools,
   missingGrantTools,
   toolGrants,
@@ -274,6 +315,7 @@ const fallbackRunPlan = ({
   supervisor: AgentSpec;
   agents: AgentSpec[];
   prompt?: string;
+  learningContext?: LearningLibraryQueryResult[];
   executableTools: string[];
   missingGrantTools: string[];
   toolGrants: ToolGrant[];
@@ -341,6 +383,9 @@ const fallbackRunPlan = ({
     plannedActions: [
       `Review ${supervisor.displayName.toLowerCase()} mission and current task brief`,
       prompt ? `Use prompt context: ${prompt}` : "Use workspace brief and latest configuration",
+      learningContext?.length
+        ? `Use ${learningContext.length} relevant learning library excerpt${learningContext.length === 1 ? "" : "s"}`
+        : "No matching learning library excerpts were found",
       `Operate with granted tools: ${executableTools.join(", ") || "none yet"}`,
       missingGrantTools.length
         ? `Do not use ungranted tools: ${missingGrantTools.join(", ")}`
@@ -452,6 +497,7 @@ export const planRun = async ({
   agent,
   agents,
   prompt,
+  learningContext = [],
   integrations,
   toolGrants,
   userId,
@@ -459,6 +505,7 @@ export const planRun = async ({
   agent: AgentSpec;
   agents: AgentSpec[];
   prompt?: string;
+  learningContext?: LearningLibraryQueryResult[];
   integrations: OrganizationIntegration[];
   toolGrants: ToolGrant[];
   userId: string;
@@ -475,6 +522,7 @@ export const planRun = async ({
   const llmPlan = await generateRunPlanWithModel({
     mission: agent.mission,
     prompt,
+    learningContext,
     agents: agents.map((candidate) => ({
       id: candidate.id,
       displayName: candidate.displayName,
@@ -493,6 +541,7 @@ export const planRun = async ({
         supervisor: agent,
         agents,
         prompt,
+        learningContext,
         executableTools,
         missingGrantTools,
         toolGrants,
@@ -560,6 +609,56 @@ export const planRun = async ({
     steps: [planningStep, ...executionSteps],
     requestedActions: plan.requestedActions,
     plan,
+  };
+};
+
+export const generateChatReply = async ({
+  message,
+  history,
+  learningContext = [],
+  integrations,
+}: {
+  message: string;
+  history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  learningContext?: LearningLibraryQueryResult[];
+  integrations: OrganizationIntegration[];
+}) => {
+  const llmReply = await generateChatReplyWithModel({
+    message,
+    history,
+    learningContext,
+    integrations,
+  });
+  if (llmReply) {
+    return {
+      ...llmReply,
+      plannerMode: "llm" as const,
+    };
+  }
+
+  const contextSummary = learningContext.length
+    ? learningContext
+        .slice(0, 4)
+        .map((result, index) => `${index + 1}. ${result.source.title}: ${result.content.slice(0, 500)}`)
+        .join("\n\n")
+    : "No matching learning library context was found.";
+
+  return {
+    answer: [
+      "I could not reach a configured model provider, so here is the retrieved workspace context instead.",
+      "",
+      contextSummary,
+      "",
+      `User message: ${message}`,
+    ].join("\n"),
+    citations: learningContext.slice(0, 4).map((result) => ({
+      sourceId: result.source.id,
+      title: result.source.title,
+      sourceType: result.source.sourceType,
+    })),
+    plannerMode: "fallback" as const,
+    modelProviderKey: null,
+    modelName: null,
   };
 };
 

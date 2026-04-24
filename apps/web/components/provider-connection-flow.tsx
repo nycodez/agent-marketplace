@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import type { IntegrationProvider, IntegrationToolDefinition } from "@agent-marketplace/integrations";
-import type { OrganizationIntegration } from "@agent-marketplace/contracts";
+import type { IntegrationToolDefinition } from "@agent-marketplace/integrations/definitions";
+import type { IntegrationProvider, OrganizationIntegration, WebsiteCredential } from "@agent-marketplace/contracts";
 import { MonochromeButton, SectionCard, StatusPill } from "@agent-marketplace/ui";
 import { API_BASE_URL, apiFetch } from "../lib/api-client";
 
@@ -30,7 +30,9 @@ type OauthStartResult = {
 const modelProviderKeys = new Set(["openai", "anthropic", "grok", "gemini", "ollama"]);
 const hasLiveConnection = (integration: OrganizationIntegration) =>
   integration.status === "connected" &&
-  (integration.providerKey !== "microsoft-365" || typeof integration.metadata.refreshToken === "string");
+  ((integration.providerKey !== "microsoft-365" &&
+    integration.providerKey !== "google-workspace") ||
+    typeof integration.metadata.refreshToken === "string");
 
 const buildInitialSelectedTools = (provider: IntegrationProvider) =>
   Object.fromEntries(provider.tools.map((tool) => [tool, true])) as Record<string, boolean>;
@@ -40,6 +42,7 @@ export function ProviderConnectionFlow({
   toolDefinitions,
 }: ProviderConnectionFlowProps) {
   const [integrations, setIntegrations] = useState<OrganizationIntegration[]>([]);
+  const [websiteCredentials, setWebsiteCredentials] = useState<WebsiteCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -62,6 +65,9 @@ export function ProviderConnectionFlow({
   const [walletAddress, setWalletAddress] = useState("");
   const [network, setNetwork] = useState(provider.key === "base" ? "base-mainnet" : "arweave-mainnet");
   const [notes, setNotes] = useState("");
+  const [defaultCredentialId, setDefaultCredentialId] = useState("");
+  const [defaultStartUrl, setDefaultStartUrl] = useState("");
+  const [headless, setHeadless] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -74,9 +80,13 @@ export function ProviderConnectionFlow({
       setError(null);
 
       try {
-        const loadedIntegrations = await apiFetch<OrganizationIntegration[]>("/organization-integrations");
+        const [loadedIntegrations, loadedWebsiteCredentials] = await Promise.all([
+          apiFetch<OrganizationIntegration[]>("/organization-integrations"),
+          apiFetch<WebsiteCredential[]>("/website-credentials"),
+        ]);
         if (!cancelled) {
           setIntegrations(loadedIntegrations);
+          setWebsiteCredentials(loadedWebsiteCredentials);
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -138,6 +148,15 @@ export function ProviderConnectionFlow({
     }
     if (typeof existingInstall.metadata.notes === "string") {
       setNotes(existingInstall.metadata.notes);
+    }
+    if (typeof existingInstall.metadata.defaultCredentialId === "string") {
+      setDefaultCredentialId(existingInstall.metadata.defaultCredentialId);
+    }
+    if (typeof existingInstall.metadata.defaultStartUrl === "string") {
+      setDefaultStartUrl(existingInstall.metadata.defaultStartUrl);
+    }
+    if (typeof existingInstall.metadata.headless === "boolean") {
+      setHeadless(existingInstall.metadata.headless);
     }
     if (provider.key === "whatsapp") {
       if (typeof existingInstall.metadata.phoneNumberId === "string") {
@@ -227,6 +246,19 @@ export function ProviderConnectionFlow({
 
     if (provider.setupMode === "webhook" && notes.trim()) {
       metadata.notes = notes.trim();
+    }
+
+    if (provider.setupMode === "credentials") {
+      if (defaultCredentialId.trim()) {
+        metadata.defaultCredentialId = defaultCredentialId.trim();
+      }
+      if (defaultStartUrl.trim()) {
+        metadata.defaultStartUrl = defaultStartUrl.trim();
+      }
+      metadata.headless = headless;
+      if (notes.trim()) {
+        metadata.notes = notes.trim();
+      }
     }
 
     return metadata;
@@ -330,13 +362,20 @@ export function ProviderConnectionFlow({
             : "Install created. Validate it before granting tools to teams.",
       );
 
-      if (provider.setupMode === "oauth" && (provider.key === "microsoft-365" || provider.key === "slack")) {
+      if (
+        provider.setupMode === "oauth" &&
+        (provider.key === "microsoft-365" || provider.key === "slack" || provider.key === "google-workspace")
+      ) {
         await startOauthPopup(created.id);
         await refreshIntegrations();
         setStatusMessage(`${provider.name} connected successfully.`);
       }
 
-      if (provider.setupMode === "api_key" || provider.setupMode === "wallet") {
+      if (
+        provider.setupMode === "api_key" ||
+        provider.setupMode === "wallet" ||
+        provider.setupMode === "credentials"
+      ) {
         setTesting(true);
         const tested = await apiFetch<IntegrationTestResult>(
           `/organization-integrations/${created.id}/test`,
@@ -399,7 +438,11 @@ export function ProviderConnectionFlow({
     setStatusMessage(null);
 
     try {
-      if (provider.key === "microsoft-365" || provider.key === "slack") {
+      if (
+        provider.key === "microsoft-365" ||
+        provider.key === "slack" ||
+        provider.key === "google-workspace"
+      ) {
         await startOauthPopup(existingInstall.id);
         await refreshIntegrations();
         setStatusMessage(`${provider.name} connected successfully.`);
@@ -718,7 +761,55 @@ export function ProviderConnectionFlow({
               </div>
             ) : null}
 
-            {provider.setupMode === "webhook" || provider.setupMode === "wallet" ? (
+            {provider.setupMode === "credentials" ? (
+              <>
+                <label className="provider-flow__field">
+                  <span>Default saved credential</span>
+                  <select
+                    className="mono-input"
+                    value={defaultCredentialId}
+                    onChange={(event) => setDefaultCredentialId(event.target.value)}
+                  >
+                    <option value="">Choose per-step at runtime</option>
+                    {websiteCredentials.map((credential) => (
+                      <option key={credential.id} value={credential.id}>
+                        {credential.label} · {credential.origin}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="provider-flow__field">
+                  <span>Default start URL</span>
+                  <input
+                    className="mono-input"
+                    value={defaultStartUrl}
+                    onChange={(event) => setDefaultStartUrl(event.target.value)}
+                    placeholder="https://billing.example.com/login"
+                  />
+                </label>
+                <label className="provider-flow__checkbox-card">
+                  <input
+                    type="checkbox"
+                    checked={headless}
+                    onChange={(event) => setHeadless(event.target.checked)}
+                  />
+                  <div>
+                    <strong>Run headless in the worker</strong>
+                    <p className="muted-copy">
+                      Leave this enabled for server execution. Disable it only for local debugging.
+                    </p>
+                  </div>
+                </label>
+                <p className="muted-copy">
+                  Manage usernames, passwords, and selectors on the{" "}
+                  <Link href="/credentials">saved website credentials</Link> page.
+                </p>
+              </>
+            ) : null}
+
+            {provider.setupMode === "webhook" ||
+            provider.setupMode === "wallet" ||
+            provider.setupMode === "credentials" ? (
               <label className="provider-flow__field">
                 <span>Operator notes</span>
                 <textarea
@@ -750,7 +841,10 @@ export function ProviderConnectionFlow({
                       Install created
                     </MonochromeButton>
                   ) : null}
-                  {(provider.setupMode === "api_key" || provider.setupMode === "wallet" || provider.key === "whatsapp") ? (
+                  {(provider.setupMode === "api_key" ||
+                    provider.setupMode === "wallet" ||
+                    provider.setupMode === "credentials" ||
+                    provider.key === "whatsapp") ? (
                     <MonochromeButton type="button" disabled={submitting} onClick={handleUpdateInstall}>
                       {submitting ? "Saving..." : "Save changes"}
                     </MonochromeButton>
@@ -764,7 +858,9 @@ export function ProviderConnectionFlow({
                           : `Complete ${provider.name} OAuth`}
                     </MonochromeButton>
                   ) : null}
-                  {(provider.setupMode === "api_key" || provider.setupMode === "wallet") ? (
+                  {(provider.setupMode === "api_key" ||
+                    provider.setupMode === "wallet" ||
+                    provider.setupMode === "credentials") ? (
                     <MonochromeButton type="button" disabled={testing} onClick={handleRetest}>
                       {testing ? "Validating..." : "Validate connection"}
                     </MonochromeButton>
@@ -849,6 +945,14 @@ export function ProviderConnectionFlow({
                   <li>Capture the wallet or signer identity the organization wants to use.</li>
                   <li>Validate the durability target before assigning it to ledger artifacts or recovery records.</li>
                   <li>Use these installs for survivability, registry anchors, and verification records, not day-to-day ops.</li>
+                </>
+              ) : null}
+
+              {provider.setupMode === "credentials" ? (
+                <>
+                  <li>Connect the browser runtime so agents can use a Playwright-backed website tool grant.</li>
+                  <li>Store usernames, passwords, and selectors on the saved credentials page instead of integration metadata.</li>
+                  <li>Use a default credential only when most runs should start from the same portal account.</li>
                 </>
               ) : null}
             </ul>

@@ -13,12 +13,15 @@ import {
   failRunStep,
   getPublicationExecutionContext,
   getRunExecutionContext,
+  getWebsiteCredentialForExecution,
+  indexRunInLearningLibrary,
   insertAuditEvent,
   markRunStepStarted,
   updateRunStatus,
 } from "@agent-marketplace/database";
 import { findToolExecutionAdapter, writeScopedTools } from "@agent-marketplace/integrations";
 import Arweave from "arweave";
+import type { JWKInterface } from "arweave/web/lib/wallet";
 import { baseSepolia } from "viem/chains";
 import { createPublicClient, createWalletClient, http, keccak256, stringToHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -62,6 +65,8 @@ const getApprovalPreview = (step: RunStep) => {
   const value = step.metadata.approvalPreview;
   return isRecord(value) ? (value as unknown as ApprovalPreview) : null;
 };
+
+const isBrowserTool = (tool: string | null) => typeof tool === "string" && tool.startsWith("browser.");
 
 const resolveIntegrationForTool = ({
   agentId,
@@ -168,6 +173,12 @@ export async function advanceRunExecution(input: AgentRunWorkflowInput): Promise
     const completed = await completeRun({
       runId: context.run.id,
       summary: `Completed ${context.steps.filter((step) => step.status === "completed").length} steps.`,
+    });
+    await indexRunInLearningLibrary({
+      runId: context.run.id,
+      organizationId: context.run.organizationId,
+      workspaceId: context.run.workspaceId,
+      createdByUserId: context.run.createdByUserId,
     });
     return {
       status: "completed",
@@ -310,6 +321,47 @@ export async function advanceRunExecution(input: AgentRunWorkflowInput): Promise
     };
   }
 
+  const credentialId = isBrowserTool(nextStep.tool)
+    ? typeof nextStep.inputSnapshot?.credentialId === "string" && nextStep.inputSnapshot.credentialId.trim()
+      ? nextStep.inputSnapshot.credentialId.trim()
+      : typeof integration.metadata.defaultCredentialId === "string" && integration.metadata.defaultCredentialId.trim()
+        ? integration.metadata.defaultCredentialId.trim()
+        : null
+    : null;
+
+  const websiteCredential = credentialId
+    ? await getWebsiteCredentialForExecution({
+        credentialId,
+        organizationId: context.run.organizationId,
+        workspaceId: context.run.workspaceId,
+      })
+    : null;
+
+  if (credentialId && !websiteCredential) {
+    const message = `Website credential ${credentialId} is not available for ${nextStep.tool}.`;
+    await failRunStep({
+      stepId: nextStep.id,
+      errorCode: "missing_credential",
+      output: message,
+      receipt: createSyntheticReceipt({
+        tool: nextStep.tool,
+        summary: message,
+        data: {
+          providerKey: integration.providerKey,
+          credentialId,
+        },
+      }),
+    });
+    await failRun({
+      runId: context.run.id,
+      summary: message,
+    });
+    return {
+      status: "failed",
+      note: message,
+    };
+  }
+
   await updateRunStatus({
     runId: context.run.id,
     status: "running",
@@ -325,6 +377,9 @@ export async function advanceRunExecution(input: AgentRunWorkflowInput): Promise
       integration,
       tool: nextStep.tool,
       args: nextStep.inputSnapshot ?? {},
+      runtime: {
+        websiteCredential,
+      },
     });
 
     await completeRunStep({
@@ -419,7 +474,7 @@ const publishToArweave = async ({
     throw new Error("ARWEAVE_WALLET_JWK is not configured.");
   }
 
-  const wallet = JSON.parse(appConfig.arweaveWalletJwk) as object;
+  const wallet = JSON.parse(appConfig.arweaveWalletJwk) as JWKInterface;
   const arweave = buildArweaveClient();
   const tx = await arweave.createTransaction({ data: content }, wallet);
   tx.addTag("App-Name", "agent-marketplace");

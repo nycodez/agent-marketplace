@@ -432,9 +432,24 @@ export const publicationRecords: PublicationRecord[] = [
     summary: "Published the pipeline manifest to Base.",
     transactionId: "base_pipeline_manifest_v1",
     gatewayUrl: "https://basescan.org/address/pipeline-operator-manifest-json",
+    explorerUrl: "https://sepolia.basescan.org/tx/base_pipeline_manifest_v1",
+    contentHash: "0xbasepipelinehash",
+    network: "base-sepolia",
     metadata: {
       chainId: 8453,
       tags: ["manifest", "pipeline"],
+    },
+    receipt: {
+      target: "base",
+      network: "base-sepolia",
+      transactionId: "base_pipeline_manifest_v1",
+      explorerUrl: "https://sepolia.basescan.org/tx/base_pipeline_manifest_v1",
+      gatewayUrl: "https://basescan.org/address/pipeline-operator-manifest-json",
+      contentHash: "0xbasepipelinehash",
+      metadataHash: "0xbasepipelinehashmeta",
+      data: {
+        chainId: 84532,
+      },
     },
     orchestration: {
       engine: "temporal",
@@ -461,9 +476,24 @@ export const publicationRecords: PublicationRecord[] = [
     summary: "Pinned the same manifest to Arweave for immutable retrieval.",
     transactionId: "ar_pipeline_manifest_v1",
     gatewayUrl: "https://arweave.net/pipeline-operator-manifest-json",
+    explorerUrl: "https://viewblock.io/arweave/tx/ar_pipeline_manifest_v1",
+    contentHash: "d34db33farweavehash",
+    network: "arweave-mainnet",
     metadata: {
       gateway: "https://arweave.net",
       tags: ["manifest", "pipeline"],
+    },
+    receipt: {
+      target: "arweave",
+      network: "arweave-mainnet",
+      transactionId: "ar_pipeline_manifest_v1",
+      explorerUrl: "https://viewblock.io/arweave/tx/ar_pipeline_manifest_v1",
+      gatewayUrl: "https://arweave.net/pipeline-operator-manifest-json",
+      contentHash: "d34db33farweavehash",
+      metadataHash: null,
+      data: {
+        gateway: "https://arweave.net",
+      },
     },
     orchestration: {
       engine: "temporal",
@@ -608,9 +638,16 @@ export const approvals: ApprovalRequest[] = [
   {
     id: "approval_1",
     runId: "run_1",
+    runStepId: "run_step_approval_1",
     workspaceId: "workspace_demo",
     status: "pending",
     summary: "Approve CRM write and outbound follow-up draft.",
+    tool: "gmail.send",
+    targetLabel: "prospect@example.com",
+    payload: {
+      subject: "Next steps",
+      to: "prospect@example.com",
+    },
     requestedActions: [
       "Execute crm.tasks.write",
       "Execute gmail.send",

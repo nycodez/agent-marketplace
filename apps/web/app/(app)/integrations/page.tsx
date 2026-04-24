@@ -12,7 +12,9 @@ type GrantWithIntegration = ToolGrant & {
 
 const hasLiveConnection = (integration: OrganizationIntegration) =>
   integration.status === "connected" &&
-  (integration.providerKey !== "microsoft-365" || typeof integration.metadata.refreshToken === "string");
+  ((integration.providerKey !== "microsoft-365" &&
+    integration.providerKey !== "google-workspace") ||
+    typeof integration.metadata.refreshToken === "string");
 
 export default function IntegrationsPage() {
   const [integrations, setIntegrations] = useState<OrganizationIntegration[]>([]);

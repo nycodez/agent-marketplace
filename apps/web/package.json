@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@agent-marketplace/contracts": "workspace:*",
+    "@agent-marketplace/integrations": "workspace:*",
     "@agent-marketplace/ui": "workspace:*",
     "next": "^15.2.2",
     "react": "^19.0.0",

@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { OrganizationIntegration } from "@agent-marketplace/contracts";
 import { MonochromeButton, SectionCard } from "@agent-marketplace/ui";
-import { integrationProviders } from "@agent-marketplace/integrations";
+import { integrationProviders } from "@agent-marketplace/integrations/catalog";
 import { apiFetch } from "../../../../lib/api-client";
 
 const hasLiveConnection = (integration: OrganizationIntegration) =>
   integration.status === "connected" &&
-  (integration.providerKey !== "microsoft-365" || typeof integration.metadata.refreshToken === "string");
+  ((integration.providerKey !== "microsoft-365" &&
+    integration.providerKey !== "google-workspace") ||
+    typeof integration.metadata.refreshToken === "string");
 
 const categoryOrder = [
   "productivity",

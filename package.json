@@ -19,6 +19,7 @@
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@types/pg": "^8.15.0",
     "typescript": "^5.8.2",
     "vitest": "^3.1.1"
   }

@@ -8,6 +8,7 @@ export { googleWorkspaceDefinition, googleWorkspaceProvider } from "./google-wor
 export { hubSpotDefinition, hubSpotProvider } from "./hubspot";
 export { microsoft365Definition, microsoft365Provider } from "./microsoft-365";
 export { ollamaDefinition, ollamaProvider } from "./ollama";
+export { playwrightBrowserDefinition, playwrightBrowserProvider } from "./playwright-browser";
 export { openAiDefinition, openAiProvider } from "./openai";
 export { salesforceDefinition, salesforceProvider } from "./salesforce";
 export { slackDefinition, slackProvider } from "./slack";

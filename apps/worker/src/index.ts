@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appConfig } from "@agent-marketplace/config";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import * as activities from "./activities.ts";
+import * as activities from "./activities";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -28,14 +28,14 @@ export const triggerTypeSchema = z.enum([
 ]);
 export const approvalRequirementSchema = z.enum(["not_required", "required"]);
 export const approvalStatusSchema = z.enum(["pending", "approved", "rejected"]);
-export const integrationAuthTypeSchema = z.enum(["oauth", "api_key", "webhook", "wallet"]);
+export const integrationAuthTypeSchema = z.enum(["oauth", "api_key", "webhook", "wallet", "credentials"]);
 export const organizationIntegrationStatusSchema = z.enum([
   "pending",
   "connected",
   "failed",
   "revoked",
 ]);
-export const setupModeSchema = z.enum(["oauth", "api_key", "webhook", "wallet"]);
+export const setupModeSchema = z.enum(["oauth", "api_key", "webhook", "wallet", "credentials"]);
 export const publicationTargetSchema = z.enum(["base", "arweave"]);
 export const publicationStatusSchema = z.enum([
   "queued",
@@ -44,6 +44,8 @@ export const publicationStatusSchema = z.enum([
   "failed",
 ]);
 export const plannerModeSchema = z.enum(["llm", "fallback"]);
+export const agentChatThreadStatusSchema = z.enum(["active", "archived"]);
+export const agentChatMessageRoleSchema = z.enum(["user", "assistant", "system"]);
 export const modelProviderKeySchema = z.enum([
   "openai",
   "anthropic",
@@ -66,6 +68,16 @@ export const programFileSourceTypeSchema = z.enum([
   "solidity",
   "text",
 ]);
+export const learningLibrarySourceTypeSchema = z.enum([
+  "manual_note",
+  "program_file",
+  "agent_run",
+  "chat_message",
+  "integration_artifact",
+  "uploaded_document",
+]);
+export const learningLibraryStatusSchema = z.enum(["pending", "indexed", "failed"]);
+export const learningLibraryVisibilitySchema = z.enum(["workspace", "agent"]);
 
 export const executionReceiptSchema = z.object({
   providerKey: z.string(),
@@ -209,6 +221,26 @@ export const organizationIntegrationSchema = z.object({
   lastValidatedAt: z.string().nullable(),
 });
 
+export const websiteCredentialSchema = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  workspaceId: z.string(),
+  label: z.string(),
+  origin: z.string().url(),
+  loginUrl: z.string().url(),
+  username: z.string(),
+  usernameSelector: z.string(),
+  passwordSelector: z.string(),
+  submitSelector: z.string().nullable(),
+  successSelector: z.string().nullable(),
+  notes: z.string().nullable(),
+  hasSecret: z.boolean(),
+  createdByUserId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastValidatedAt: z.string().nullable(),
+});
+
 export const toolGrantSchema = z.object({
   id: z.string(),
   workspaceId: z.string(),
@@ -279,6 +311,61 @@ export const programFileSchema = z.object({
   createdByUserId: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
+});
+
+export const learningLibrarySourceSchema = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  workspaceId: z.string(),
+  sourceType: learningLibrarySourceTypeSchema,
+  sourceId: z.string(),
+  title: z.string(),
+  summary: z.string().nullable(),
+  status: learningLibraryStatusSchema,
+  visibility: learningLibraryVisibilitySchema,
+  metadata: z.record(z.unknown()),
+  indexedAt: z.string().nullable(),
+  indexError: z.string().nullable(),
+  deletedAt: z.string().nullable(),
+  createdByUserId: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  chunkCount: z.number().int().nonnegative().optional(),
+});
+
+export const learningLibraryQueryResultSchema = z.object({
+  source: learningLibrarySourceSchema,
+  chunkId: z.string(),
+  chunkIndex: z.number().int().nonnegative(),
+  content: z.string(),
+  score: z.number(),
+  metadata: z.record(z.unknown()),
+});
+
+export const agentChatThreadSchema = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  workspaceId: z.string(),
+  title: z.string(),
+  status: agentChatThreadStatusSchema,
+  createdByUserId: z.string(),
+  archivedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastMessage: z.string().nullable().optional(),
+  messageCount: z.number().int().nonnegative().optional(),
+});
+
+export const agentChatMessageSchema = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  organizationId: z.string(),
+  workspaceId: z.string(),
+  role: agentChatMessageRoleSchema,
+  content: z.string(),
+  memoryContext: z.array(learningLibraryQueryResultSchema),
+  metadata: z.record(z.unknown()),
+  createdAt: z.string(),
 });
 
 export const publicationRecordSchema = z.object({
@@ -408,6 +495,32 @@ export const updateIntegrationInputSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+export const createWebsiteCredentialInputSchema = z.object({
+  label: z.string().min(2),
+  origin: z.string().url(),
+  loginUrl: z.string().url(),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  usernameSelector: z.string().min(1),
+  passwordSelector: z.string().min(1),
+  submitSelector: z.string().min(1).nullable().optional(),
+  successSelector: z.string().min(1).nullable().optional(),
+  notes: z.string().nullable().optional(),
+});
+
+export const updateWebsiteCredentialInputSchema = z.object({
+  label: z.string().min(2).optional(),
+  origin: z.string().url().optional(),
+  loginUrl: z.string().url().optional(),
+  username: z.string().min(1).optional(),
+  password: z.string().min(1).optional(),
+  usernameSelector: z.string().min(1).optional(),
+  passwordSelector: z.string().min(1).optional(),
+  submitSelector: z.string().min(1).nullable().optional(),
+  successSelector: z.string().min(1).nullable().optional(),
+  notes: z.string().nullable().optional(),
+});
+
 export const createToolGrantInputSchema = z.object({
   organizationIntegrationId: z.string(),
   tools: z.array(z.string()).min(1),
@@ -442,6 +555,44 @@ export const runCreateInputSchema = z.object({
   prompt: z.string().min(3).optional(),
 });
 
+export const createLearningLibrarySourceInputSchema = z.object({
+  title: z.string().min(2),
+  content: z.string().min(1),
+  summary: z.string().nullable().optional(),
+  sourceType: learningLibrarySourceTypeSchema.default("manual_note"),
+  sourceId: z.string().min(1).optional(),
+  visibility: learningLibraryVisibilitySchema.default("workspace"),
+  metadata: z.record(z.unknown()).default({}),
+});
+
+export const updateLearningLibrarySourceInputSchema = z.object({
+  title: z.string().min(2).optional(),
+  summary: z.string().nullable().optional(),
+  visibility: learningLibraryVisibilitySchema.optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+export const learningLibraryQueryInputSchema = z.object({
+  query: z.string().min(2),
+  sourceTypes: z.array(learningLibrarySourceTypeSchema).optional(),
+  limit: z.number().int().min(1).max(20).default(8),
+});
+
+export const reindexLearningLibraryInputSchema = z.object({
+  sourceType: learningLibrarySourceTypeSchema.optional(),
+  sourceId: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(500).default(100),
+});
+
+export const createAgentChatThreadInputSchema = z.object({
+  title: z.string().min(2).optional(),
+  message: z.string().min(1).optional(),
+});
+
+export const createAgentChatMessageInputSchema = z.object({
+  message: z.string().min(1),
+});
+
 export type MembershipRole = z.infer<typeof membershipRoleSchema>;
 export type DraftStatus = z.infer<typeof draftStatusSchema>;
 export type AgentStatus = z.infer<typeof agentStatusSchema>;
@@ -454,10 +605,15 @@ export type SetupMode = z.infer<typeof setupModeSchema>;
 export type PublicationTarget = z.infer<typeof publicationTargetSchema>;
 export type PublicationStatus = z.infer<typeof publicationStatusSchema>;
 export type PlannerMode = z.infer<typeof plannerModeSchema>;
+export type AgentChatThreadStatus = z.infer<typeof agentChatThreadStatusSchema>;
+export type AgentChatMessageRole = z.infer<typeof agentChatMessageRoleSchema>;
 export type ModelProviderKey = z.infer<typeof modelProviderKeySchema>;
 export type OrchestrationEngine = z.infer<typeof orchestrationEngineSchema>;
 export type OrchestrationStatus = z.infer<typeof orchestrationStatusSchema>;
 export type ProgramFileSourceType = z.infer<typeof programFileSourceTypeSchema>;
+export type LearningLibrarySourceType = z.infer<typeof learningLibrarySourceTypeSchema>;
+export type LearningLibraryStatus = z.infer<typeof learningLibraryStatusSchema>;
+export type LearningLibraryVisibility = z.infer<typeof learningLibraryVisibilitySchema>;
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
 export type ApprovalPreview = z.infer<typeof approvalPreviewSchema>;
 export type PublicationReceipt = z.infer<typeof publicationReceiptSchema>;
@@ -471,12 +627,17 @@ export type User = z.infer<typeof userSchema>;
 export type Membership = z.infer<typeof membershipSchema>;
 export type IntegrationProvider = z.infer<typeof integrationProviderSchema>;
 export type OrganizationIntegration = z.infer<typeof organizationIntegrationSchema>;
+export type WebsiteCredential = z.infer<typeof websiteCredentialSchema>;
 export type ToolGrant = z.infer<typeof toolGrantSchema>;
 export type RunPlanStep = z.infer<typeof runPlanStepSchema>;
 export type RunPlan = z.infer<typeof runPlanSchema>;
 export type DraftGenerationResult = z.infer<typeof draftGenerationResultSchema>;
 export type OrchestrationRef = z.infer<typeof orchestrationRefSchema>;
 export type ProgramFile = z.infer<typeof programFileSchema>;
+export type LearningLibrarySource = z.infer<typeof learningLibrarySourceSchema>;
+export type LearningLibraryQueryResult = z.infer<typeof learningLibraryQueryResultSchema>;
+export type AgentChatThread = z.infer<typeof agentChatThreadSchema>;
+export type AgentChatMessage = z.infer<typeof agentChatMessageSchema>;
 export type PublicationRecord = z.infer<typeof publicationRecordSchema>;
 export type RunStep = z.infer<typeof runStepSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
@@ -489,8 +650,16 @@ export type CreateDraftInput = z.infer<typeof createDraftInputSchema>;
 export type UpdateDraftInput = z.infer<typeof updateDraftInputSchema>;
 export type InstallIntegrationInput = z.infer<typeof installIntegrationInputSchema>;
 export type UpdateIntegrationInput = z.infer<typeof updateIntegrationInputSchema>;
+export type CreateWebsiteCredentialInput = z.infer<typeof createWebsiteCredentialInputSchema>;
+export type UpdateWebsiteCredentialInput = z.infer<typeof updateWebsiteCredentialInputSchema>;
 export type CreateToolGrantInput = z.infer<typeof createToolGrantInputSchema>;
 export type CreateProgramFileInput = z.infer<typeof createProgramFileInputSchema>;
 export type UpdateProgramFileInput = z.infer<typeof updateProgramFileInputSchema>;
 export type PublishProgramFileInput = z.infer<typeof publishProgramFileInputSchema>;
 export type RunCreateInput = z.infer<typeof runCreateInputSchema>;
+export type CreateLearningLibrarySourceInput = z.infer<typeof createLearningLibrarySourceInputSchema>;
+export type UpdateLearningLibrarySourceInput = z.infer<typeof updateLearningLibrarySourceInputSchema>;
+export type LearningLibraryQueryInput = z.infer<typeof learningLibraryQueryInputSchema>;
+export type ReindexLearningLibraryInput = z.infer<typeof reindexLearningLibraryInputSchema>;
+export type CreateAgentChatThreadInput = z.infer<typeof createAgentChatThreadInputSchema>;
+export type CreateAgentChatMessageInput = z.infer<typeof createAgentChatMessageInputSchema>;
